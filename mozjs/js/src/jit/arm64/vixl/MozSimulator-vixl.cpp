@@ -43,8 +43,9 @@ using mozilla::DebugOnly;
 using js::jit::ABIFunctionType;
 using js::jit::SimulatorProcess;
 
-Simulator::Simulator(Decoder* decoder, FILE* stream)
-  : stream_(nullptr)
+Simulator::Simulator(JSContext* cx, Decoder* decoder, FILE* stream)
+  : cx_(cx)
+  , stream_(nullptr)
   , print_disasm_(nullptr)
   , instrumentation_(nullptr)
   , stack_(nullptr)
@@ -168,9 +169,9 @@ Simulator* Simulator::Create(JSContext* cx) {
   // FIXME: Note that it can't be stored in the SimulatorRuntime due to lifetime conflicts.
   Simulator *sim;
   if (getenv("USE_DEBUGGER") != nullptr)
-    sim = js_new<Debugger>(decoder, stdout);
+    sim = js_new<Debugger>(cx, decoder, stdout);
   else
-    sim = js_new<Simulator>(decoder, stdout);
+    sim = js_new<Simulator>(cx, decoder, stdout);
 
   // Check if Simulator:init ran out of memory.
   if (sim && sim->oom()) {
@@ -242,13 +243,20 @@ void Simulator::handle_wasm_interrupt() {
   void* pc = (void*)get_pc();
   uint8_t* fp = (uint8_t*)xreg(30);
 
-  js::WasmActivation* activation = JSContext::innermostWasmActivation();
-  const js::wasm::Code* code = activation->compartment()->wasm.lookupCode(pc);
-  if (!code || !code->segment().containsFunctionPC(pc))
+  js::WasmActivation* activation = js::wasm::ActivationIfInnermost(cx_);
+  const js::wasm::CodeSegment* segment;
+  const js::wasm::Code* code = activation->compartment()->wasm.lookupCode(pc, &segment);
+  if (!code || !segment->containsFunctionPC(pc))
     return;
 
-  activation->startInterrupt(pc, fp);
-  set_pc((Instruction*)code->segment().interruptCode());
+  JS::ProfilingFrameIterator::RegisterState state;
+  state.pc = pc;
+  state.fp = fp;
+  state.lr = (uint8_t*) xreg(30);
+  state.sp = (uint8_t*) xreg(31);
+  activation->startInterrupt(state);
+
+  set_pc((Instruction*)segment->interruptCode());
 }
 
 

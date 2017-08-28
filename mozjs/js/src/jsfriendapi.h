@@ -96,6 +96,22 @@ JS_PCToLineNumber(JSScript* script, jsbytecode* pc, unsigned* columnp = nullptr)
 extern JS_FRIEND_API(bool)
 JS_IsDeadWrapper(JSObject* obj);
 
+/**
+ * Creates a new dead wrapper object in the given scope. To be used when
+ * attempting to wrap objects from scopes which are already dead.
+ *
+ * If origObject is passed, it must be an proxy object, and will be
+ * used to determine the characteristics of the new dead wrapper.
+ */
+extern JS_FRIEND_API(JSObject*)
+JS_NewDeadWrapper(JSContext* cx, JSObject* origObject = nullptr);
+
+/**
+ * Determine whether the given object is a ScriptSourceObject.
+ */
+extern JS_FRIEND_API(bool)
+JS_IsScriptSourceObject(JSObject* obj);
+
 /*
  * Used by the cycle collector to trace through a shape or object group and
  * all cycle-participating data it reaches, using bounded stack space.
@@ -105,13 +121,21 @@ JS_TraceShapeCycleCollectorChildren(JS::CallbackTracer* trc, JS::GCCellPtr shape
 extern JS_FRIEND_API(void)
 JS_TraceObjectGroupCycleCollectorChildren(JS::CallbackTracer* trc, JS::GCCellPtr group);
 
+/*
+ * Telemetry reasons passed to the accumulate telemetry callback.
+ *
+ * It's OK for these enum values to change as they will be mapped to a fixed
+ * member of the mozilla::Telemetry::HistogramID enum by the callback.
+ */
 enum {
     JS_TELEMETRY_GC_REASON,
     JS_TELEMETRY_GC_IS_ZONE_GC,
     JS_TELEMETRY_GC_MS,
     JS_TELEMETRY_GC_BUDGET_MS,
+    JS_TELEMETRY_GC_BUDGET_OVERRUN,
     JS_TELEMETRY_GC_ANIMATION_MS,
     JS_TELEMETRY_GC_MAX_PAUSE_MS,
+    JS_TELEMETRY_GC_MAX_PAUSE_MS_2,
     JS_TELEMETRY_GC_MARK_MS,
     JS_TELEMETRY_GC_SWEEP_MS,
     JS_TELEMETRY_GC_COMPACT_MS,
@@ -119,6 +143,7 @@ enum {
     JS_TELEMETRY_GC_MARK_GRAY_MS,
     JS_TELEMETRY_GC_SLICE_MS,
     JS_TELEMETRY_GC_SLOW_PHASE,
+    JS_TELEMETRY_GC_SLOW_TASK,
     JS_TELEMETRY_GC_MMU_50,
     JS_TELEMETRY_GC_RESET,
     JS_TELEMETRY_GC_RESET_REASON,
@@ -146,6 +171,24 @@ typedef void
 
 extern JS_FRIEND_API(void)
 JS_SetAccumulateTelemetryCallback(JSContext* cx, JSAccumulateTelemetryDataCallback callback);
+
+/*
+ * Use counter names passed to the accumulate use counter callback.
+ *
+ * It's OK to for these enum values to change as they will be mapped to a
+ * fixed member of the mozilla::UseCounter enum by the callback.
+ */
+
+enum class JSUseCounter {
+    ASMJS,
+    WASM
+};
+
+typedef void
+(*JSSetUseCounterCallback)(JSObject* obj, JSUseCounter counter);
+
+extern JS_FRIEND_API(void)
+JS_SetSetUseCounterCallback(JSContext* cx, JSSetUseCounterCallback callback);
 
 extern JS_FRIEND_API(bool)
 JS_GetIsSecureContext(JSCompartment* compartment);
@@ -331,9 +374,9 @@ struct JSFunctionSpecWithHelp {
 };
 
 #define JS_FN_HELP(name,call,nargs,flags,usage,help)                          \
-    {name, call, nargs, (flags) | JSPROP_ENUMERATE | JSFUN_STUB_GSOPS, nullptr, usage, help}
+    {name, call, nargs, (flags) | JSPROP_ENUMERATE, nullptr, usage, help}
 #define JS_INLINABLE_FN_HELP(name,call,nargs,flags,native,usage,help)         \
-    {name, call, nargs, (flags) | JSPROP_ENUMERATE | JSFUN_STUB_GSOPS, &js::jit::JitInfo_##native,\
+    {name, call, nargs, (flags) | JSPROP_ENUMERATE, &js::jit::JitInfo_##native,\
      usage, help}
 #define JS_FS_HELP_END                                                        \
     {nullptr, nullptr, 0, 0, nullptr, nullptr}
@@ -381,6 +424,33 @@ SetSourceHook(JSContext* cx, mozilla::UniquePtr<SourceHook> hook);
 /** Remove |cx|'s source hook, and return it. The caller now owns the hook. */
 extern JS_FRIEND_API(mozilla::UniquePtr<SourceHook>)
 ForgetSourceHook(JSContext* cx);
+
+/**
+ * Use the runtime's internal handling of job queues for Promise jobs.
+ *
+ * Most embeddings, notably web browsers, will have their own task scheduling
+ * systems and need to integrate handling of Promise jobs into that, so they
+ * will want to manage job queues themselves. For basic embeddings such as the
+ * JS shell that don't have an event loop of their own, it's easier to have
+ * SpiderMonkey handle job queues internally.
+ *
+ * Note that the embedding still has to trigger processing of job queues at
+ * right time(s), such as after evaluation of a script has run to completion.
+ */
+extern JS_FRIEND_API(bool)
+UseInternalJobQueues(JSContext* cx);
+
+/**
+ * Instruct the runtime to stop draining the internal job queue.
+ *
+ * Useful if the embedding is in the process of quitting in reaction to a
+ * builtin being called, or if it wants to resume executing jobs later on.
+ */
+extern JS_FRIEND_API(void)
+StopDrainingJobQueue(JSContext* cx);
+
+extern JS_FRIEND_API(void)
+RunJobs(JSContext* cx);
 
 extern JS_FRIEND_API(JS::Zone*)
 GetCompartmentZone(JSCompartment* comp);
@@ -639,18 +709,6 @@ inline void AssertSameCompartment(JSObject* objA, JSObject* objB) {}
 
 JS_FRIEND_API(void)
 NotifyAnimationActivity(JSObject* obj);
-
-/**
- * Return the outermost enclosing function (script) of the scripted caller.
- * This function returns nullptr in several cases:
- *  - no script is running on the context
- *  - the caller is in global or eval code
- * In particular, this function will "stop" its outermost search at eval() and
- * thus it will really return the outermost enclosing function *since the
- * innermost eval*.
- */
-JS_FRIEND_API(JSFunction*)
-GetOutermostEnclosingFunctionOfScriptedCaller(JSContext* cx);
 
 JS_FRIEND_API(JSFunction*)
 DefineFunctionWithReserved(JSContext* cx, JSObject* obj, const char* name, JSNative call,
@@ -1148,9 +1206,8 @@ extern JS_FRIEND_API(unsigned)
 GetEnterCompartmentDepth(JSContext* cx);
 #endif
 
-extern JS_FRIEND_API(bool)
-RegExpToSharedNonInline(JSContext* cx, JS::HandleObject regexp,
-                        JS::MutableHandle<RegExpShared*> shared);
+extern JS_FRIEND_API(RegExpShared*)
+RegExpToSharedNonInline(JSContext* cx, JS::HandleObject regexp);
 
 /* Implemented in CrossCompartmentWrapper.cpp. */
 typedef enum NukeReferencesToWindow {
@@ -1204,7 +1261,7 @@ struct CompartmentsWithPrincipals : public CompartmentFilter {
 extern JS_FRIEND_API(bool)
 NukeCrossCompartmentWrappers(JSContext* cx,
                              const CompartmentFilter& sourceFilter,
-                             const CompartmentFilter& targetFilter,
+                             JSCompartment* target,
                              NukeReferencesToWindow nukeReferencesToWindow,
                              NukeReferencesFromTarget nukeReferencesFromTarget);
 
@@ -1279,6 +1336,34 @@ inline bool DOMProxyIsShadowing(DOMProxyShadowsResult result) {
            result == ShadowsViaDirectExpando ||
            result == ShadowsViaIndirectExpando;
 }
+
+// Callbacks and other information for use by the JITs when optimizing accesses
+// on xray wrappers.
+struct XrayJitInfo {
+    // Test whether a proxy handler is a cross compartment xray with no
+    // security checks.
+    bool (*isCrossCompartmentXray)(const BaseProxyHandler* handler);
+
+    // Test whether xrays with a global object's compartment have expandos of
+    // their own, instead of sharing them with Xrays from other compartments.
+    bool (*globalHasExclusiveExpandos)(JSObject* obj);
+
+    // Proxy reserved slot used by xrays in sandboxes to store their holder
+    // object.
+    size_t xrayHolderSlot;
+
+    // Reserved slot used by xray holders to store the xray's expando object.
+    size_t holderExpandoSlot;
+
+    // Reserved slot used by xray expandos to store a custom prototype.
+    size_t expandoProtoSlot;
+};
+
+JS_FRIEND_API(void)
+SetXrayJitInfo(XrayJitInfo* info);
+
+XrayJitInfo*
+GetXrayJitInfo();
 
 /* Implemented in jsdate.cpp. */
 
@@ -1356,6 +1441,10 @@ class MOZ_STACK_CLASS JS_FRIEND_API(AutoStableStringChars)
     bool isLatin1() const { return state_ == Latin1; }
     bool isTwoByte() const { return state_ == TwoByte; }
 
+    const JS::Latin1Char* latin1Chars() const {
+        MOZ_ASSERT(state_ == Latin1);
+        return latin1Chars_;
+    }
     const char16_t* twoByteChars() const {
         MOZ_ASSERT(state_ == TwoByte);
         return twoByteChars_;
@@ -1455,8 +1544,8 @@ struct MOZ_STACK_CLASS JS_FRIEND_API(ErrorReport)
     bool populateUncaughtExceptionReportUTF8(JSContext* cx, ...);
     bool populateUncaughtExceptionReportUTF8VA(JSContext* cx, va_list ap);
 
-    // Reports exceptions from add-on scopes to telementry.
-    void ReportAddonExceptionToTelementry(JSContext* cx);
+    // Reports exceptions from add-on scopes to telemetry.
+    void ReportAddonExceptionToTelemetry(JSContext* cx);
 
     // We may have a provided JSErrorReport, so need a way to represent that.
     JSErrorReport* reportp;
@@ -1820,6 +1909,9 @@ UnwrapArrayBufferView(JSObject* obj);
 extern JS_FRIEND_API(JSObject*)
 UnwrapSharedArrayBuffer(JSObject* obj);
 
+extern JS_FRIEND_API(JSObject*)
+UnwrapReadableStream(JSObject* obj);
+
 
 namespace detail {
 
@@ -2035,6 +2127,12 @@ JS_IsArrayBufferViewObject(JSObject* obj);
  */
 extern JS_FRIEND_API(uint32_t)
 JS_GetArrayBufferViewByteLength(JSObject* obj);
+
+/**
+ * More generic name for JS_GetTypedArrayByteOffset to cover DataViews as well
+ */
+extern JS_FRIEND_API(uint32_t)
+JS_GetArrayBufferViewByteOffset(JSObject* obj);
 
 /*
  * Return a pointer to the start of the data referenced by a typed array. The
@@ -2575,6 +2673,7 @@ JSID_FROM_BITS(size_t bits)
 namespace js {
 namespace detail {
 bool IdMatchesAtom(jsid id, JSAtom* atom);
+bool IdMatchesAtom(jsid id, JSString* atom);
 } // namespace detail
 } // namespace js
 
@@ -2601,6 +2700,15 @@ bool IdMatchesAtom(jsid id, JSAtom* atom);
  */
 static MOZ_ALWAYS_INLINE jsid
 NON_INTEGER_ATOM_TO_JSID(JSAtom* atom)
+{
+    MOZ_ASSERT(((size_t)atom & 0x7) == 0);
+    jsid id = JSID_FROM_BITS((size_t)atom);
+    MOZ_ASSERT(js::detail::IdMatchesAtom(id, atom));
+    return id;
+}
+
+static MOZ_ALWAYS_INLINE jsid
+NON_INTEGER_ATOM_TO_JSID(JSString* atom)
 {
     MOZ_ASSERT(((size_t)atom & 0x7) == 0);
     jsid id = JSID_FROM_BITS((size_t)atom);
@@ -2814,14 +2922,6 @@ SetJitExceptionHandler(JitExceptionHandler handler);
 #endif
 
 /**
- * Get the nearest enclosing with environment object for a given function. If
- * the function is not scripted or is not enclosed by a with scope, returns
- * the global.
- */
-extern JS_FRIEND_API(JSObject*)
-GetNearestEnclosingWithEnvironmentObjectForFunction(JSFunction* fun);
-
-/**
  * Get the first SavedFrame object in this SavedFrame stack whose principals are
  * subsumed by the cx's principals. If there is no such frame, return nullptr.
  *
@@ -2978,163 +3078,5 @@ extern JS_FRIEND_API(bool)
 SystemZoneAvailable(JSContext* cx);
 
 } /* namespace js */
-
-class NativeProfiler
-{
-  public:
-    virtual ~NativeProfiler() {};
-    virtual void sampleNative(void* addr, uint32_t size) = 0;
-    virtual void removeNative(void* addr) = 0;
-    virtual void reset() = 0;
-};
-
-class GCHeapProfiler
-{
-  public:
-    virtual ~GCHeapProfiler() {};
-    virtual void sampleTenured(void* addr, uint32_t size) = 0;
-    virtual void sampleNursery(void* addr, uint32_t size) = 0;
-    virtual void markTenuredStart() = 0;
-    virtual void markTenured(void* addr) = 0;
-    virtual void sweepTenured() = 0;
-    virtual void sweepNursery() = 0;
-    virtual void moveNurseryToTenured(void* addrOld, void* addrNew) = 0;
-    virtual void reset() = 0;
-};
-
-class MemProfiler
-{
-    static mozilla::Atomic<uint32_t, mozilla::Relaxed> sActiveProfilerCount;
-    static JS_FRIEND_DATA(NativeProfiler*) sNativeProfiler;
-
-    static GCHeapProfiler* GetGCHeapProfiler(void* addr);
-    static GCHeapProfiler* GetGCHeapProfiler(JSRuntime* runtime);
-
-    static NativeProfiler* GetNativeProfiler() {
-        return sNativeProfiler;
-    }
-
-    GCHeapProfiler* mGCHeapProfiler;
-    JSRuntime* mRuntime;
-
-  public:
-    explicit MemProfiler(JSRuntime* aRuntime) : mGCHeapProfiler(nullptr), mRuntime(aRuntime) {}
-
-    JS_FRIEND_API(void) start(GCHeapProfiler* aGCHeapProfiler);
-    JS_FRIEND_API(void) stop();
-
-    GCHeapProfiler* getGCHeapProfiler() const {
-        return mGCHeapProfiler;
-    }
-
-    static MOZ_ALWAYS_INLINE bool enabled() {
-        return sActiveProfilerCount > 0;
-    }
-
-    static JS_FRIEND_API(MemProfiler*) GetMemProfiler(JSContext* context);
-
-    static void SetNativeProfiler(NativeProfiler* aProfiler) {
-        sNativeProfiler = aProfiler;
-    }
-
-    static MOZ_ALWAYS_INLINE void SampleNative(void* addr, uint32_t size) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        NativeProfiler* profiler = GetNativeProfiler();
-        if (profiler)
-            profiler->sampleNative(addr, size);
-    }
-
-    static MOZ_ALWAYS_INLINE void SampleTenured(void* addr, uint32_t size) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(addr);
-        if (profiler)
-            profiler->sampleTenured(addr, size);
-    }
-
-    static MOZ_ALWAYS_INLINE void SampleNursery(void* addr, uint32_t size) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(addr);
-        if (profiler)
-            profiler->sampleNursery(addr, size);
-    }
-
-    static MOZ_ALWAYS_INLINE void RemoveNative(void* addr) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        NativeProfiler* profiler = GetNativeProfiler();
-        if (profiler)
-            profiler->removeNative(addr);
-    }
-
-    static MOZ_ALWAYS_INLINE void MarkTenuredStart(JSRuntime* runtime) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(runtime);
-        if (profiler)
-            profiler->markTenuredStart();
-    }
-
-    static MOZ_ALWAYS_INLINE void MarkTenured(void* addr) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(addr);
-        if (profiler)
-            profiler->markTenured(addr);
-    }
-
-    static MOZ_ALWAYS_INLINE void SweepTenured(JSRuntime* runtime) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(runtime);
-        if (profiler)
-            profiler->sweepTenured();
-    }
-
-    static MOZ_ALWAYS_INLINE void SweepNursery(JSRuntime* runtime) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(runtime);
-        if (profiler)
-            profiler->sweepNursery();
-    }
-
-    static MOZ_ALWAYS_INLINE void MoveNurseryToTenured(void* addrOld, void* addrNew) {
-        JS::AutoSuppressGCAnalysis nogc;
-
-        if (MOZ_LIKELY(!enabled()))
-            return;
-
-        GCHeapProfiler* profiler = GetGCHeapProfiler(addrOld);
-        if (profiler)
-            profiler->moveNurseryToTenured(addrOld, addrNew);
-    }
-};
 
 #endif /* jsfriendapi_h */

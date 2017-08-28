@@ -111,15 +111,10 @@ CodeGeneratorX86::visitBox(LBox* box)
 void
 CodeGeneratorX86::visitBoxFloatingPoint(LBoxFloatingPoint* box)
 {
-    const LAllocation* in = box->getOperand(0);
+    const AnyRegister in = ToAnyRegister(box->getOperand(0));
     const ValueOperand out = ToOutValue(box);
 
-    FloatRegister reg = ToFloatRegister(in);
-    if (box->type() == MIRType::Float32) {
-        masm.convertFloat32ToDouble(reg, ScratchFloat32Reg);
-        reg = ScratchFloat32Reg;
-    }
-    masm.boxDouble(reg, out);
+    masm.moveValue(TypedOrValueRegister(box->type(), in), out);
 }
 
 void
@@ -1057,6 +1052,30 @@ CodeGeneratorX86::visitExtendInt32ToInt64(LExtendInt32ToInt64* lir)
         MOZ_ASSERT(output.high == edx);
         masm.cdq();
     }
+}
+
+void
+CodeGeneratorX86::visitSignExtendInt64(LSignExtendInt64* lir)
+{
+#ifdef DEBUG
+    Register64 input = ToRegister64(lir->getInt64Operand(0));
+    Register64 output = ToOutRegister64(lir);
+    MOZ_ASSERT(input.low == eax);
+    MOZ_ASSERT(output.low == eax);
+    MOZ_ASSERT(input.high == edx);
+    MOZ_ASSERT(output.high == edx);
+#endif
+    switch (lir->mode()) {
+      case MSignExtendInt64::Byte:
+        masm.move8SignExtend(eax, eax);
+        break;
+      case MSignExtendInt64::Half:
+        masm.move16SignExtend(eax, eax);
+        break;
+      case MSignExtendInt64::Word:
+        break;
+    }
+    masm.cdq();
 }
 
 void

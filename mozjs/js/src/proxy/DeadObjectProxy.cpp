@@ -153,19 +153,18 @@ DeadObjectProxy<CC>::className(JSContext* cx, HandleObject wrapper) const
 
 template <DeadProxyIsCallableIsConstructorOption CC>
 JSString*
-DeadObjectProxy<CC>::fun_toString(JSContext* cx, HandleObject proxy, unsigned indent) const
+DeadObjectProxy<CC>::fun_toString(JSContext* cx, HandleObject proxy, bool isToSource) const
 {
     ReportDead(cx);
     return nullptr;
 }
 
 template <DeadProxyIsCallableIsConstructorOption CC>
-bool
-DeadObjectProxy<CC>::regexp_toShared(JSContext* cx, HandleObject proxy,
-                                     MutableHandle<RegExpShared*> shared) const
+RegExpShared*
+DeadObjectProxy<CC>::regexp_toShared(JSContext* cx, HandleObject proxy) const
 {
     ReportDead(cx);
-    return false;
+    return nullptr;
 }
 
 template <>
@@ -184,4 +183,38 @@ js::IsDeadProxyObject(JSObject* obj)
            IsDerivedProxyObject(obj, DeadObjectProxy<DeadProxyIsCallableIsConstructor>::singleton()) ||
            IsDerivedProxyObject(obj, DeadObjectProxy<DeadProxyIsCallableNotConstructor>::singleton()) ||
            IsDerivedProxyObject(obj, DeadObjectProxy<DeadProxyNotCallableIsConstructor>::singleton());
+}
+
+
+const BaseProxyHandler*
+js::SelectDeadProxyHandler(ProxyObject* obj)
+{
+    // When nuking scripted proxies, isCallable and isConstructor values for
+    // the proxy needs to be preserved.
+    uint32_t callable = obj->handler()->isCallable(obj);
+    uint32_t constructor = obj->handler()->isConstructor(obj);
+
+    if (callable) {
+        if (constructor)
+            return DeadObjectProxy<DeadProxyIsCallableIsConstructor>::singleton();
+        return DeadObjectProxy<DeadProxyIsCallableNotConstructor>::singleton();
+    }
+
+    if (constructor)
+        return DeadObjectProxy<DeadProxyNotCallableIsConstructor>::singleton();
+    return DeadObjectProxy<DeadProxyNotCallableNotConstructor>::singleton();
+}
+
+JSObject*
+js::NewDeadProxyObject(JSContext* cx, JSObject* origObj)
+{
+    MOZ_ASSERT_IF(origObj, origObj->is<ProxyObject>());
+
+    const BaseProxyHandler* handler;
+    if (origObj && origObj->is<ProxyObject>())
+        handler = SelectDeadProxyHandler(&origObj->as<ProxyObject>());
+    else
+        handler = DeadObjectProxy<DeadProxyNotCallableNotConstructor>::singleton();
+
+    return NewProxyObject(cx, handler, NullHandleValue, nullptr, ProxyOptions());
 }

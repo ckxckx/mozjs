@@ -105,10 +105,10 @@ struct CGYieldAndAwaitOffsetList {
     void finish(YieldAndAwaitOffsetArray& array, uint32_t prologueLength);
 };
 
-// Use zero inline elements because these go on the stack and affect how many
-// nested functions are possible.
-typedef Vector<jsbytecode, 0> BytecodeVector;
-typedef Vector<jssrcnote, 0> SrcNotesVector;
+// Have a few inline elements, so as to avoid heap allocation for tiny
+// sequences.  See bug 1390526.
+typedef Vector<jsbytecode, 64> BytecodeVector;
+typedef Vector<jssrcnote, 64> SrcNotesVector;
 
 // Linked list of jump instructions that need to be patched. The linked list is
 // stored in the bytes of the incomplete bytecode that will be patched, so no
@@ -191,9 +191,20 @@ struct MOZ_STACK_CLASS BytecodeEmitter
         BytecodeVector code;        /* bytecode */
         SrcNotesVector notes;       /* source notes, see below */
         ptrdiff_t   lastNoteOffset; /* code offset for last source note */
-        uint32_t    currentLine;    /* line number for tree-based srcnote gen */
-        uint32_t    lastColumn;     /* zero-based column index on currentLine of
-                                       last SRC_COLSPAN-annotated opcode */
+
+        // Line number for srcnotes.
+        //
+        // WARNING: If this becomes out of sync with already-emitted srcnotes,
+        // we can get undefined behavior.
+        uint32_t    currentLine;
+
+        // Zero-based column index on currentLine of last SRC_COLSPAN-annotated
+        // opcode.
+        //
+        // WARNING: If this becomes out of sync with already-emitted srcnotes,
+        // we can get undefined behavior.
+        uint32_t    lastColumn;
+
         JumpTarget lastTarget;      // Last jump target emitted.
 
         EmitSection(JSContext* cx, uint32_t lineNum)
@@ -707,10 +718,6 @@ struct MOZ_STACK_CLASS BytecodeEmitter
 
     template <typename NameEmitter>
     MOZ_MUST_USE bool emitDestructuringDeclsWithEmitter(ParseNode* pattern, NameEmitter emitName);
-
-    // Throw a TypeError if the value atop the stack isn't convertible to an
-    // object, with no overall effect on the stack.
-    MOZ_MUST_USE bool emitRequireObjectCoercible();
 
     enum class CopyOption {
         Filtered, Unfiltered

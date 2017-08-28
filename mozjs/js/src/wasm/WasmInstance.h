@@ -104,18 +104,19 @@ class Instance
     bool init(JSContext* cx);
     void trace(JSTracer* trc);
 
-    JSContext* cx() const { return tlsData()->cx; }
     JSCompartment* compartment() const { return compartment_; }
     const Code& code() const { return *code_; }
     DebugState& debug() { return *debug_; }
     const DebugState& debug() const { return *debug_; }
-    const CodeSegment& codeSegment() const { return code_->segment(); }
+    const CodeSegment& codeSegment(Tier t) const { return code_->segment(t); }
     const GlobalSegment& globalSegment() const { return *globals_; }
-    uint8_t* codeBase() const { return code_->segment().base(); }
+    uint8_t* codeBase(Tier t) const { return code_->segment(t).base(); }
+    const MetadataTier& metadata(Tier t) const { return code_->metadata(t); }
     const Metadata& metadata() const { return code_->metadata(); }
     bool isAsmJS() const { return metadata().isAsmJS(); }
     const SharedTableVector& tables() const { return tables_; }
     SharedMem<uint8_t*> memoryBase() const;
+    WasmMemoryObject* memory() const;
     size_t memoryLength() const;
     size_t memoryMappedSize() const;
     bool memoryAccessInGuardRegion(uint8_t* addr, unsigned numBytes) const;
@@ -133,6 +134,13 @@ class Instance
     // value in args.rval.
 
     MOZ_MUST_USE bool callExport(JSContext* cx, uint32_t funcIndex, CallArgs args);
+
+    // Return the name associated with a given function index, or generate one
+    // if none was given by the module.
+
+    bool getFuncName(uint32_t funcIndex, UTF8Bytes* name) const;
+    JSAtom* getFuncAtom(JSContext* cx, uint32_t funcIndex) const;
+    void ensureProfilingLabels(bool profilingEnabled) const;
 
     // Initially, calls to imports in wasm code call out through the generic
     // callImport method. If the imported callee gets JIT compiled and the types
@@ -153,7 +161,8 @@ class Instance
     void onMovingGrowTable();
 
     // Debug support:
-    bool debugEnabled() const { return code_->metadata().debugEnabled; }
+
+    bool debugEnabled() const { return metadata().debugEnabled; }
     bool enterFrameTrapsEnabled() const { return enterFrameTrapsEnabled_; }
     void ensureEnterFrameTrapsState(JSContext* cx, bool enabled);
 

@@ -38,9 +38,8 @@ unsafe extern fn finalize(_fop: *mut JSFreeOp, _object: *mut JSObject) {
 static CLASS_OPS: JSClassOps = JSClassOps {
     addProperty: None,
     delProperty: None,
-    getProperty: None,
-    setProperty: None,
     enumerate: None,
+    newEnumerate: None,
     resolve: None,
     mayResolve: None,
     finalize: Some(finalize),

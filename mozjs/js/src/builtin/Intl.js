@@ -107,11 +107,11 @@ function removeUnicodeExtensions(locale) {
     var left = callFunction(String_substring, locale, 0, pos);
     var right = callFunction(String_substring, locale, pos);
 
-    var extensions;
     var unicodeLocaleExtensionSequenceRE = getUnicodeLocaleExtensionSequenceRE();
-    while ((extensions = regexp_exec_no_statics(unicodeLocaleExtensionSequenceRE, left)) !== null) {
-        left = callFunction(String_replace, left, extensions[0], "");
-        unicodeLocaleExtensionSequenceRE.lastIndex = 0;
+    var extensions = regexp_exec_no_statics(unicodeLocaleExtensionSequenceRE, left);
+    if (extensions !== null) {
+        left = callFunction(String_substring, left, 0, extensions.index) +
+               callFunction(String_substring, left, extensions.index + extensions[0].length);
     }
 
     var combined = left + right;
@@ -436,25 +436,31 @@ function CanonicalizeLanguageTag(locale) {
         subtags[i] = subtag;
         i++;
     }
-    var normal = callFunction(std_Array_join, callFunction(std_Array_slice, subtags, 0, i), "-");
+
+    // Directly return when the language tag doesn't contain any extension or
+    // private use sub-tags.
+    if (i === subtags.length)
+        return callFunction(std_Array_join, subtags, "-");
+
+    var normal = ArrayJoinRange(subtags, "-", 0, i);
 
     // Extension sequences are sorted by their singleton characters.
     // "u-ca-chinese-t-zh-latn" -> "t-zh-latn-u-ca-chinese"
-    var extensions = new List();
+    var extensions = [];
     while (i < subtags.length && subtags[i] !== "x") {
         var extensionStart = i;
         i++;
         while (i < subtags.length && subtags[i].length > 1)
             i++;
-        var extension = callFunction(std_Array_join, callFunction(std_Array_slice, subtags, extensionStart, i), "-");
-        callFunction(std_Array_push, extensions, extension);
+        var extension = ArrayJoinRange(subtags, "-", extensionStart, i);
+        _DefineDataProperty(extensions, extensions.length, extension);
     }
-    callFunction(std_Array_sort, extensions);
+    callFunction(ArraySort, extensions);
 
     // Private use sequences are left as is. "x-private"
     var privateUse = "";
     if (i < subtags.length)
-        privateUse = callFunction(std_Array_join, callFunction(std_Array_slice, subtags, i), "-");
+        privateUse = ArrayJoinRange(subtags, "-", i);
 
     // Put everything back together.
     var canonical = normal;
@@ -469,6 +475,26 @@ function CanonicalizeLanguageTag(locale) {
     }
 
     return canonical;
+}
+
+
+/**
+ * Joins the array elements in the given range with the supplied separator.
+ */
+function ArrayJoinRange(array, separator, from, to = array.length) {
+    assert(typeof separator === "string", "|separator| is a string value");
+    assert(typeof from === "number", "|from| is a number value");
+    assert(typeof to === "number", "|to| is a number value");
+    assert(0 <= from && from <= to && to <= array.length, "|from| and |to| form a valid range");
+
+    if (from === to)
+        return "";
+
+    var result = array[from];
+    for (var i = from + 1; i < to; i++) {
+        result += separator + array[i];
+    }
+    return result;
 }
 
 
@@ -792,7 +818,7 @@ function addSpecialMissingLanguageTags(availableLocales) {
 
     // Also forcibly provide the last-ditch locale.
     var lastDitch = lastDitchLocale();
-    assert(lastDitch === "en-GB" && availableLocales["en"],
+    assert(lastDitch === "en-GB" && availableLocales.en,
            "shouldn't be a need to add every locale implied by the last-" +
            "ditch locale, merely just the last-ditch locale");
     availableLocales[lastDitch] = true;
@@ -806,10 +832,13 @@ function addSpecialMissingLanguageTags(availableLocales) {
  */
 function CanonicalizeLocaleList(locales) {
     if (locales === undefined)
-        return new List();
-    var seen = new List();
-    if (typeof locales === "string")
-        locales = [locales];
+        return [];
+    if (typeof locales === "string") {
+        if (!IsStructurallyValidLanguageTag(locales))
+            ThrowRangeError(JSMSG_INVALID_LANGUAGE_TAG, locales);
+        return [CanonicalizeLanguageTag(locales)];
+    }
+    var seen = [];
     var O = ToObject(locales);
     var len = ToLength(O.length);
     var k = 0;
@@ -825,7 +854,7 @@ function CanonicalizeLocaleList(locales) {
                 ThrowRangeError(JSMSG_INVALID_LANGUAGE_TAG, tag);
             tag = CanonicalizeLanguageTag(tag);
             if (callFunction(ArrayIndexOf, seen, tag) === -1)
-                callFunction(std_Array_push, seen, tag);
+                _DefineDataProperty(seen, seen.length, tag);
         }
         k++;
     }
@@ -898,7 +927,6 @@ function BestAvailableLocaleIgnoringDefault(availableLocales, locale) {
     return BestAvailableLocaleHelper(availableLocales, locale, false);
 }
 
-var noRelevantExtensionKeys = [];
 
 /**
  * Compares a BCP 47 language priority list against the set of locales in
@@ -1058,26 +1086,17 @@ function ResolveLocale(availableLocales, requestedLocales, options, relevantExte
     // Step 8.
     var supportedExtension = "-u";
 
+    // In this implementation, localeData is a function, not an object.
+    var localeDataProvider = localeData();
+
     // Steps 9-12.
-    var i = 0;
-    var len = relevantExtensionKeys.length;
-    var foundLocaleData;
-    if (len > 0) {
-        // In this implementation, localeData is a function, not an object.
-        // Step 12.b.
-        foundLocaleData = localeData(foundLocale);
-    }
-    while (i < len) {
+    for (var i = 0; i < relevantExtensionKeys.length; i++) {
         // Step 12.a.
         var key = relevantExtensionKeys[i];
 
-        // Step 12.c.
-        var keyLocaleData = foundLocaleData[key];
-
-        // Locale data provides default value.
-        // Step 12.d.
-        var value = keyLocaleData[0];
-        assert(typeof value === "string" || value === null, "unexpected locale data value");
+        // Steps 12.b-d (The locale data is only computed when needed).
+        var keyLocaleData = undefined;
+        var value = undefined;
 
         // Locale tag may override.
 
@@ -1096,6 +1115,9 @@ function ResolveLocale(availableLocales, requestedLocales, options, relevantExte
 
             // Step 12.f.ii.
             if (requestedValue !== undefined) {
+                // Steps 12.b-c.
+                keyLocaleData = callFunction(localeDataProvider[key], null, foundLocale);
+
                 // Step 12.f.ii.1.
                 if (requestedValue !== "") {
                     // Step 12.f.ii.1.a.
@@ -1120,18 +1142,29 @@ function ResolveLocale(availableLocales, requestedLocales, options, relevantExte
         var optionsValue = options[key];
 
         // Step 12.g, 12.g.ii.
-        if (optionsValue !== undefined &&
-            optionsValue !== value &&
-            callFunction(ArrayIndexOf, keyLocaleData, optionsValue) !== -1)
-        {
-            value = optionsValue;
-            supportedExtensionAddition = "";
+        if (optionsValue !== undefined && optionsValue !== value) {
+            // Steps 12.b-c.
+            if (keyLocaleData === undefined)
+                keyLocaleData = callFunction(localeDataProvider[key], null, foundLocale);
+
+            if (callFunction(ArrayIndexOf, keyLocaleData, optionsValue) !== -1) {
+                value = optionsValue;
+                supportedExtensionAddition = "";
+            }
+        }
+
+        // Locale data provides default value.
+        if (value === undefined) {
+            // Steps 12.b-d.
+            value = keyLocaleData === undefined
+                    ? callFunction(localeDataProvider.default[key], null, foundLocale)
+                    : keyLocaleData[0];
         }
 
         // Steps 12.h-j.
+        assert(typeof value === "string" || value === null, "unexpected locale data value");
         result[key] = value;
         supportedExtension += supportedExtensionAddition;
-        i++;
     }
 
     // Step 13.
@@ -1177,7 +1210,7 @@ function ResolveLocale(availableLocales, requestedLocales, options, relevantExte
 function LookupSupportedLocales(availableLocales, requestedLocales) {
     // Steps 1-2.
     var len = requestedLocales.length;
-    var subset = new List();
+    var subset = [];
 
     // Steps 3-4.
     var k = 0;
@@ -1189,14 +1222,14 @@ function LookupSupportedLocales(availableLocales, requestedLocales) {
         // Step 4.c-d.
         var availableLocale = BestAvailableLocale(availableLocales, noExtensionsLocale);
         if (availableLocale !== undefined)
-            callFunction(std_Array_push, subset, locale);
+            _DefineDataProperty(subset, subset.length, locale);
 
         // Step 4.e.
         k++;
     }
 
     // Steps 5-6.
-    return callFunction(std_Array_slice, subset, 0);
+    return subset;
 }
 
 
@@ -1554,15 +1587,11 @@ function resolveCollatorInternals(lazyCollatorData) {
     // Steps 21-22.
     var s = lazyCollatorData.rawSensitivity;
     if (s === undefined) {
-        if (collatorIsSorting) {
-            // Step 21.a.
-            s = "variant";
-        } else {
-            // Step 21.b.
-            var dataLocale = r.dataLocale;
-            var dataLocaleData = localeData(dataLocale);
-            s = dataLocaleData.sensitivity;
-        }
+        // In theory the default sensitivity for the "search" collator is
+        // locale dependent; in reality the CLDR/ICU default strength is
+        // always tertiary. Therefore use "variant" as the default value for
+        // both collation modes.
+        s = "variant";
     }
     internalProps.sensitivity = s;
 
@@ -1735,49 +1764,97 @@ var collatorInternalProperties = {
 
 
 /**
- * Returns the default caseFirst values for the given locale and usage. The
- * first element in the returned array denotes the default value per ES2017
- * Intl, 9.1 Internal slots of Service Constructors.
+ * Returns the actual locale used when a collator for |locale| is constructed.
  */
-function collatorCaseFirst(locale, usage) {
+function collatorActualLocale(locale) {
     assert(typeof locale === "string", "locale should be string");
-    assert(usage === "sort" || usage === "search", "invalid usage option");
 
-    if (usage === "sort") {
-        // If |locale| is the default locale (e.g. da-DK), but only supported
-        // through a fallback (da), we need to get the actual locale before we
-        // can call intl_isUpperCaseFirst. Also see BestAvailableLocaleHelper.
-        var availableLocales = callFunction(collatorInternalProperties.availableLocales,
-                                            collatorInternalProperties);
-        var actualLocale = BestAvailableLocaleIgnoringDefault(availableLocales, locale);
+    // If |locale| is the default locale (e.g. da-DK), but only supported
+    // through a fallback (da), we need to get the actual locale before we
+    // can call intl_isUpperCaseFirst. Also see BestAvailableLocaleHelper.
+    var availableLocales = callFunction(collatorInternalProperties.availableLocales,
+                                        collatorInternalProperties);
+    return BestAvailableLocaleIgnoringDefault(availableLocales, locale);
+}
 
-        if (intl_isUpperCaseFirst(actualLocale))
-            return ["upper", "false", "lower"];
-    }
+
+/**
+ * Returns the default caseFirst values for the given locale. The first
+ * element in the returned array denotes the default value per ES2017 Intl,
+ * 9.1 Internal slots of Service Constructors.
+ */
+function collatorSortCaseFirst(locale) {
+    var actualLocale = collatorActualLocale(locale);
+    if (intl_isUpperCaseFirst(actualLocale))
+        return ["upper", "false", "lower"];
 
     // Default caseFirst values for all other languages.
     return ["false", "lower", "upper"];
 }
 
 
-function collatorSortLocaleData(locale) {
-    return {
-        co: intl_availableCollations(locale),
-        kn: ["false", "true"],
-        kf: collatorCaseFirst(locale, "sort"),
-    };
+/**
+ * Returns the default caseFirst value for the given locale.
+ */
+function collatorSortCaseFirstDefault(locale) {
+    var actualLocale = collatorActualLocale(locale);
+    if (intl_isUpperCaseFirst(actualLocale))
+        return "upper";
+
+    // Default caseFirst value for all other languages.
+    return "false";
 }
 
 
-function collatorSearchLocaleData(locale) {
+function collatorSortLocaleData() {
+    /* eslint-disable object-shorthand */
     return {
-        co: [null],
-        kn: ["false", "true"],
-        kf: collatorCaseFirst(locale, "search"),
-        // In theory the default sensitivity is locale dependent;
-        // in reality the CLDR/ICU default strength is always tertiary.
-        sensitivity: "variant"
+        co: intl_availableCollations,
+        kn: function() {
+            return ["false", "true"];
+        },
+        kf: collatorSortCaseFirst,
+        default: {
+            co: function() {
+                // The first element of the collations array must be |null|
+                // per ES2017 Intl, 10.2.3 Internal Slots.
+                return null;
+            },
+            kn: function() {
+                return "false";
+            },
+            kf: collatorSortCaseFirstDefault,
+        }
     };
+    /* eslint-enable object-shorthand */
+}
+
+
+function collatorSearchLocaleData() {
+    /* eslint-disable object-shorthand */
+    return {
+        co: function() {
+            return [null];
+        },
+        kn: function() {
+            return ["false", "true"];
+        },
+        kf: function() {
+            return ["false", "lower", "upper"];
+        },
+        default: {
+            co: function() {
+                return null;
+            },
+            kn: function() {
+                return "false";
+            },
+            kf: function() {
+                return "false";
+            },
+        }
+    };
+    /* eslint-enable object-shorthand */
 }
 
 
@@ -2232,9 +2309,12 @@ function getNumberingSystems(locale) {
 }
 
 
-function numberFormatLocaleData(locale) {
+function numberFormatLocaleData() {
     return {
-        nu: getNumberingSystems(locale)
+        nu: getNumberingSystems,
+        default: {
+            nu: intl_numberingSystem,
+        }
     };
 }
 
@@ -2926,10 +3006,14 @@ var dateTimeFormatInternalProperties = {
 };
 
 
-function dateTimeFormatLocaleData(locale) {
+function dateTimeFormatLocaleData() {
     return {
-        ca: intl_availableCalendars(locale),
-        nu: getNumberingSystems(locale)
+        ca: intl_availableCalendars,
+        nu: getNumberingSystems,
+        default: {
+            ca: intl_defaultCalendar,
+            nu: intl_numberingSystem,
+        }
     };
 }
 
@@ -3143,6 +3227,7 @@ function resolveICUPattern(pattern, result) {
  * Spec: ECMAScript 402 API, PluralRules, 1.3.3.
  */
 var pluralRulesInternalProperties = {
+    localeData: pluralRulesLocaleData,
     _availableLocales: null,
     availableLocales: function() // eslint-disable-line object-shorthand
     {
@@ -3153,8 +3238,16 @@ var pluralRulesInternalProperties = {
         locales = intl_PluralRules_availableLocales();
         addSpecialMissingLanguageTags(locales);
         return (this._availableLocales = locales);
-    }
+    },
+    relevantExtensionKeys: [],
 };
+
+
+function pluralRulesLocaleData() {
+    // PluralRules don't support any extension keys.
+    return {};
+}
+
 
 /**
  * Compute an internal properties object from |lazyPluralRulesData|.
@@ -3170,7 +3263,7 @@ function resolvePluralRulesInternals(lazyPluralRulesData) {
     const r = ResolveLocale(callFunction(PluralRules.availableLocales, PluralRules),
                           lazyPluralRulesData.requestedLocales,
                           lazyPluralRulesData.opt,
-                          noRelevantExtensionKeys, undefined);
+                          PluralRules.relevantExtensionKeys, PluralRules.localeData);
 
     // Step 14.
     internalProps.locale = r.locale;
@@ -3342,10 +3435,15 @@ function Intl_PluralRules_resolvedOptions() {
 
     var internals = getPluralRulesInternals(this);
 
+    var internalsPluralCategories = internals.pluralCategories;
+    var pluralCategories = [];
+    for (var i = 0; i < internalsPluralCategories.length; i++)
+        _DefineDataProperty(pluralCategories, i, internalsPluralCategories[i]);
+
     var result = {
         locale: internals.locale,
         type: internals.type,
-        pluralCategories: callFunction(std_Array_slice, internals.pluralCategories, 0),
+        pluralCategories,
         minimumIntegerDigits: internals.minimumIntegerDigits,
         minimumFractionDigits: internals.minimumFractionDigits,
         maximumFractionDigits: internals.maximumFractionDigits,
@@ -3374,16 +3472,8 @@ function Intl_PluralRules_resolvedOptions() {
  * ES2017 Intl draft rev 947aa9a0c853422824a0c9510d8f09be3eb416b9
  */
 function Intl_getCanonicalLocales(locales) {
-    // Step 1.
-    var localeList = CanonicalizeLocaleList(locales);
-
-    // Step 2 (Inlined CreateArrayFromList).
-    var array = [];
-
-    for (var n = 0, len = localeList.length; n < len; n++)
-        _DefineDataProperty(array, n, localeList[n]);
-
-    return array;
+    // Steps 1-2.
+    return CanonicalizeLocaleList(locales);
 }
 
 /**

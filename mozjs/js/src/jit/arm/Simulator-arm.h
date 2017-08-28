@@ -38,8 +38,12 @@
 #include "jit/IonTypes.h"
 #include "threading/Thread.h"
 #include "vm/MutexIDs.h"
+#include "wasm/WasmCode.h"
 
 namespace js {
+
+class WasmActivation;
+
 namespace jit {
 
 class Simulator;
@@ -193,7 +197,9 @@ class Simulator
     T get_pc_as() const { return reinterpret_cast<T>(get_pc()); }
 
     void trigger_wasm_interrupt() {
-        MOZ_ASSERT(!wasm_interrupt_);
+        // This can be called several times if a single interrupt isn't caught
+        // and handled by the simulator, but this is fine; once the current
+        // instruction is done executing, the interrupt will be handled anyhow.
         wasm_interrupt_ = true;
     }
 
@@ -287,6 +293,7 @@ class Simulator
 
     // Handle a wasm interrupt triggered by an async signal handler.
     void handleWasmInterrupt();
+    void startInterrupt(WasmActivation* act);
 
     // Handle any wasm faults, returning true if the fault was handled.
     bool handleWasmFault(int32_t addr, unsigned numBytes);
@@ -417,8 +424,9 @@ class Simulator
     bool pc_modified_;
     int64_t icount_;
 
-    // wasm async interrupt support
+    // wasm async interrupt / fault support
     bool wasm_interrupt_;
+    wasm::SharedCode wasm_code_;
 
     // Debugger input.
     char* lastDebuggerInput_;

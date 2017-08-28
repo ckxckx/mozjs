@@ -49,10 +49,16 @@ struct InstanceComparator
         // Instances can share code, so the segments can be equal (though they
         // can't partially overlap).  If the codeBases are equal, we sort by
         // Instance address.  Thus a Code may map to many instances.
-        if (instance->codeBase() == target.codeBase())
+
+        // Compare by the first tier, always.
+
+        Tier instanceTier = instance->code().stableTier();
+        Tier targetTier = target.code().stableTier();
+
+        if (instance->codeBase(instanceTier) == target.codeBase(targetTier))
             return instance < &target ? -1 : 1;
 
-        return target.codeBase() < instance->codeBase() ? -1 : 1;
+        return target.codeBase(targetTier) < instance->codeBase(instanceTier) ? -1 : 1;
     }
 };
 
@@ -62,7 +68,7 @@ Compartment::registerInstance(JSContext* cx, HandleWasmInstanceObject instanceOb
     Instance& instance = instanceObj->instance();
     MOZ_ASSERT(this == &instance.compartment()->wasm);
 
-    instance.code().ensureProfilingLabels(cx->runtime()->geckoProfiler().enabled());
+    instance.ensureProfilingLabels(cx->runtime()->geckoProfiler().enabled());
 
     if (instance.debugEnabled() &&
         instance.compartment()->debuggerObservesAllExecution())
@@ -97,20 +103,8 @@ Compartment::unregisterInstance(Instance& instance)
     instances_.erase(instances_.begin() + index);
 }
 
-struct PCComparator
-{
-    const void* pc;
-    explicit PCComparator(const void* pc) : pc(pc) {}
-
-    int operator()(const Instance* instance) const {
-        if (instance->codeSegment().containsCodePC(pc))
-            return 0;
-        return pc < instance->codeBase() ? -1 : 1;
-    }
-};
-
 const Code*
-Compartment::lookupCode(const void* pc) const
+Compartment::lookupCode(const void* pc, const CodeSegment** segmentp) const
 {
     // lookupCode() can be called asynchronously from the interrupt signal
     // handler. In that case, the signal handler is just asking whether the pc
@@ -119,18 +113,29 @@ Compartment::lookupCode(const void* pc) const
     if (mutatingInstances_)
         return nullptr;
 
-    size_t index;
-    if (!BinarySearchIf(instances_, 0, instances_.length(), PCComparator(pc), &index))
-        return nullptr;
+    // Linear search because instances are only ordered by their first tiers,
+    // but may have two.  This code should not be hot anyway, we avoid
+    // lookupCode when we can.
+    for (auto i : instances_) {
+        const Code& code = i->code();
+        for (auto t : code.tiers()) {
+            const CodeSegment& segment = code.segment(t);
+            if (segment.containsCodePC(pc)) {
+                if (segmentp)
+                    *segmentp = &segment;
+                return &code;
+            }
+        }
+    }
 
-    return &instances_[index]->code();
+    return nullptr;
 }
 
 void
 Compartment::ensureProfilingLabels(bool profilingEnabled)
 {
     for (Instance* instance : instances_)
-        instance->code().ensureProfilingLabels(profilingEnabled);
+        instance->ensureProfilingLabels(profilingEnabled);
 }
 
 void

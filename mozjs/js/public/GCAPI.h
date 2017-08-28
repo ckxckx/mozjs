@@ -13,6 +13,7 @@
 #include "js/GCAnnotations.h"
 #include "js/HeapAPI.h"
 #include "js/UniquePtr.h"
+#include "js/Utility.h"
 
 namespace js {
 namespace gc {
@@ -55,7 +56,7 @@ namespace JS {
     D(API)                                      \
     D(EAGER_ALLOC_TRIGGER)                      \
     D(DESTROY_RUNTIME)                          \
-    D(UNUSED0)                                  \
+    D(ROOTS_REMOVED)                            \
     D(LAST_DITCH)                               \
     D(TOO_MUCH_MALLOC)                          \
     D(ALLOC_TRIGGER)                            \
@@ -64,11 +65,17 @@ namespace JS {
     D(RESET)                                    \
     D(OUT_OF_NURSERY)                           \
     D(EVICT_NURSERY)                            \
-    D(FULL_STORE_BUFFER)                        \
+    D(DELAYED_ATOMS_GC)                         \
     D(SHARED_MEMORY_LIMIT)                      \
     D(UNUSED1)                                  \
     D(INCREMENTAL_TOO_SLOW)                     \
     D(ABORT_GC)                                 \
+    D(FULL_WHOLE_CELL_BUFFER)                   \
+    D(FULL_GENERIC_BUFFER)                      \
+    D(FULL_VALUE_BUFFER)                        \
+    D(FULL_CELL_PTR_BUFFER)                     \
+    D(FULL_SLOT_BUFFER)                         \
+    D(FULL_SHAPE_BUFFER)                        \
                                                 \
     /* These are reserved for future use. */    \
     D(RESERVED0)                                \
@@ -81,12 +88,6 @@ namespace JS {
     D(RESERVED7)                                \
     D(RESERVED8)                                \
     D(RESERVED9)                                \
-    D(RESERVED10)                               \
-    D(RESERVED11)                               \
-    D(RESERVED12)                               \
-    D(RESERVED13)                               \
-    D(RESERVED14)                               \
-    D(RESERVED15)                               \
                                                 \
     /* Reasons from Firefox */                  \
     D(DOM_WINDOW_UTILS)                         \
@@ -107,7 +108,7 @@ namespace JS {
     D(REFRESH_FRAME)                            \
     D(FULL_GC_TIMER)                            \
     D(SHUTDOWN_CC)                              \
-    D(FINISH_LARGE_EVALUATE)                    \
+    D(UNUSED2)                                  \
     D(USER_INACTIVE)                            \
     D(XPCONNECT_SHUTDOWN)
 
@@ -318,13 +319,9 @@ class GarbageCollectionEvent
 
 enum GCProgress {
     /*
-     * During non-incremental GC, the GC is bracketed by JSGC_CYCLE_BEGIN/END
-     * callbacks. During an incremental GC, the sequence of callbacks is as
-     * follows:
-     *   JSGC_CYCLE_BEGIN, JSGC_SLICE_END  (first slice)
-     *   JSGC_SLICE_BEGIN, JSGC_SLICE_END  (second slice)
-     *   ...
-     *   JSGC_SLICE_BEGIN, JSGC_CYCLE_END  (last slice)
+     * During GC, the GC is bracketed by GC_CYCLE_BEGIN/END callbacks. Each
+     * slice between those (whether an incremental or the sole non-incremental
+     * slice) is bracketed by GC_SLICE_BEGIN/GC_SLICE_END.
      */
 
     GC_CYCLE_BEGIN,
@@ -335,18 +332,30 @@ enum GCProgress {
 
 struct JS_PUBLIC_API(GCDescription) {
     bool isZone_;
+    bool isComplete_;
     JSGCInvocationKind invocationKind_;
     gcreason::Reason reason_;
 
-    GCDescription(bool isZone, JSGCInvocationKind kind, gcreason::Reason reason)
-      : isZone_(isZone), invocationKind_(kind), reason_(reason) {}
+    GCDescription(bool isZone, bool isComplete, JSGCInvocationKind kind, gcreason::Reason reason)
+      : isZone_(isZone), isComplete_(isComplete), invocationKind_(kind), reason_(reason) {}
 
     char16_t* formatSliceMessage(JSContext* cx) const;
     char16_t* formatSummaryMessage(JSContext* cx) const;
     char16_t* formatJSON(JSContext* cx, uint64_t timestamp) const;
 
+    mozilla::TimeStamp startTime(JSContext* cx) const;
+    mozilla::TimeStamp endTime(JSContext* cx) const;
+    mozilla::TimeStamp lastSliceStart(JSContext* cx) const;
+    mozilla::TimeStamp lastSliceEnd(JSContext* cx) const;
+
+    JS::UniqueChars sliceToJSON(JSContext* cx) const;
+    JS::UniqueChars summaryToJSON(JSContext* cx) const;
+
     JS::dbg::GarbageCollectionEvent::Ptr toGCEvent(JSContext* cx) const;
 };
+
+extern JS_PUBLIC_API(UniqueChars)
+MinorGcToJSON(JSContext* cx);
 
 typedef void
 (* GCSliceCallback)(JSContext* cx, GCProgress progress, const GCDescription& desc);
@@ -545,20 +554,6 @@ class JS_PUBLIC_API(AutoAssertNoAlloc)
 };
 
 /**
- * Assert if a GC barrier is invoked while this class is live. This class does
- * not disable the static rooting hazard analysis.
- */
-class JS_PUBLIC_API(AutoAssertOnBarrier)
-{
-    JSContext* context;
-    bool prev;
-
-  public:
-    explicit AutoAssertOnBarrier(JSContext* cx);
-    ~AutoAssertOnBarrier();
-};
-
-/**
  * Disable the static rooting hazard analysis in the live region and assert if
  * any allocation that could potentially trigger a GC occurs while this guard
  * object is live. This is most useful to help the exact rooting hazard analysis
@@ -636,9 +631,6 @@ UnmarkGrayGCThingRecursively(GCCellPtr thing);
 namespace js {
 namespace gc {
 
-extern JS_FRIEND_API(bool)
-BarriersAreAllowedOnCurrentThread();
-
 static MOZ_ALWAYS_INLINE void
 ExposeGCThingToActiveJS(JS::GCCellPtr thing)
 {
@@ -652,8 +644,6 @@ ExposeGCThingToActiveJS(JS::GCCellPtr thing)
     // another runtime.
     if (thing.mayBeOwnedByOtherRuntime())
         return;
-
-    MOZ_DIAGNOSTIC_ASSERT(BarriersAreAllowedOnCurrentThread());
 
     if (IsIncrementalBarrierNeededOnTenuredGCThing(thing))
         JS::IncrementalReadBarrier(thing);
@@ -712,11 +702,9 @@ ExposeScriptToActiveJS(JSScript* script)
 
 /*
  * Internal to Firefox.
- *
- * Note: this is not related to the PokeGC in nsJSEnvironment.
  */
 extern JS_FRIEND_API(void)
-PokeGC(JSContext* cx);
+NotifyGCRootsRemoved(JSContext* cx);
 
 /*
  * Internal to Firefox.

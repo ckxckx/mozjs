@@ -232,9 +232,7 @@ DefineHelpProperty(JSContext* cx, HandleObject obj, const char* prop, const char
     RootedAtom atom(cx, Atomize(cx, value, strlen(value)));
     if (!atom)
         return false;
-    return JS_DefineProperty(cx, obj, prop, atom,
-                             JSPROP_READONLY | JSPROP_PERMANENT,
-                             JS_STUBGETTER, JS_STUBSETTER);
+    return JS_DefineProperty(cx, obj, prop, atom, JSPROP_READONLY | JSPROP_PERMANENT);
 }
 
 JS_FRIEND_API(bool)
@@ -419,34 +417,6 @@ js::RunningWithTrustedPrincipals(JSContext* cx)
 }
 
 JS_FRIEND_API(JSFunction*)
-js::GetOutermostEnclosingFunctionOfScriptedCaller(JSContext* cx)
-{
-    ScriptFrameIter iter(cx);
-
-    // Skip eval frames.
-    while (!iter.done() && iter.isEvalFrame())
-        ++iter;
-
-    if (iter.done())
-        return nullptr;
-
-    if (!iter.isFunctionFrame())
-        return nullptr;
-
-    if (iter.compartment() != cx->compartment())
-        return nullptr;
-
-    RootedFunction curr(cx, iter.callee(cx));
-    for (ScopeIter si(curr->nonLazyScript()); si; si++) {
-        if (si.kind() == ScopeKind::Function)
-            curr = si.scope()->as<FunctionScope>().canonicalFunction();
-    }
-
-    assertSameCompartment(cx, curr);
-    return curr;
-}
-
-JS_FRIEND_API(JSFunction*)
 js::DefineFunctionWithReserved(JSContext* cx, JSObject* objArg, const char* name, JSNative call,
                                unsigned nargs, unsigned attrs)
 {
@@ -597,6 +567,18 @@ JS_IsDeadWrapper(JSObject* obj)
     return IsDeadProxyObject(obj);
 }
 
+JS_FRIEND_API(JSObject*)
+JS_NewDeadWrapper(JSContext* cx, JSObject* origObj)
+{
+    return NewDeadProxyObject(cx, origObj);
+}
+
+JS_FRIEND_API(bool)
+JS_IsScriptSourceObject(JSObject* obj)
+{
+    return obj->is<ScriptSourceObject>();
+}
+
 void
 js::TraceWeakMaps(WeakMapTracer* trc)
 {
@@ -638,7 +620,7 @@ struct VisitGrayCallbackFunctor {
 
     template <class T>
     void operator()(T tp) const {
-        if ((*tp)->isTenured() && (*tp)->asTenured().isMarked(gc::GRAY))
+        if ((*tp)->isMarkedGray())
             callback_(closure_, JS::GCCellPtr(*tp));
     }
 };
@@ -671,6 +653,12 @@ JS_FRIEND_API(void)
 JS_SetAccumulateTelemetryCallback(JSContext* cx, JSAccumulateTelemetryDataCallback callback)
 {
     cx->runtime()->setTelemetryCallback(cx->runtime(), callback);
+}
+
+JS_FRIEND_API(void)
+JS_SetSetUseCounterCallback(JSContext* cx, JSSetUseCounterCallback callback)
+{
+    cx->runtime()->setUseCounterCallback(cx->runtime(), callback);
 }
 
 JS_FRIEND_API(JSObject*)
@@ -1120,10 +1108,13 @@ static char
 MarkDescriptor(void* thing)
 {
     gc::TenuredCell* cell = gc::TenuredCell::fromPointer(thing);
-    if (cell->isMarked(gc::BLACK))
-        return cell->isMarked(gc::GRAY) ? 'G' : 'B';
-    else
-        return cell->isMarked(gc::GRAY) ? 'X' : 'W';
+    if (cell->isMarkedBlack())
+        return 'B';
+    if (cell->isMarkedGray())
+        return 'G';
+    if (cell->isMarkedAny())
+        return 'X';
+    return 'W';
 }
 
 static void
@@ -1189,7 +1180,7 @@ js::DumpHeap(JSContext* cx, FILE* fp, js::DumpHeapNurseryBehaviour nurseryBehavi
     {
         JSRuntime* rt = cx->runtime();
         js::gc::AutoPrepareForTracing prep(cx, WithAtoms);
-        gcstats::AutoPhase ap(rt->gc.stats(), gcstats::PHASE_TRACE_HEAP);
+        gcstats::AutoPhase ap(rt->gc.stats(), gcstats::PhaseKind::TRACE_HEAP);
         rt->gc.traceRuntime(&dtrc, prep.session().lock);
     }
 
@@ -1222,9 +1213,9 @@ JS::NotifyDidPaint(JSContext* cx)
 }
 
 JS_FRIEND_API(void)
-JS::PokeGC(JSContext* cx)
+JS::NotifyGCRootsRemoved(JSContext* cx)
 {
-    cx->runtime()->gc.poke();
+    cx->runtime()->gc.notifyRootsRemoved();
 }
 
 JS_FRIEND_API(JSCompartment*)
@@ -1318,8 +1309,28 @@ js::GetDOMProxyShadowsCheck()
     return gDOMProxyShadowsCheck;
 }
 
+static XrayJitInfo* gXrayJitInfo = nullptr;
+
+JS_FRIEND_API(void)
+js::SetXrayJitInfo(XrayJitInfo* info)
+{
+    gXrayJitInfo = info;
+}
+
+XrayJitInfo*
+js::GetXrayJitInfo()
+{
+    return gXrayJitInfo;
+}
+
 bool
 js::detail::IdMatchesAtom(jsid id, JSAtom* atom)
+{
+    return id == INTERNED_STRING_TO_JSID(nullptr, atom);
+}
+
+bool
+js::detail::IdMatchesAtom(jsid id, JSString* atom)
 {
     return id == INTERNED_STRING_TO_JSID(nullptr, atom);
 }
@@ -1493,5 +1504,5 @@ JS_FRIEND_API(bool)
 js::SystemZoneAvailable(JSContext* cx)
 {
     CooperatingContext& owner = cx->runtime()->gc.systemZoneGroup->ownerContext();
-    return owner.context() == cx || owner.context() == nullptr;
+    return owner.context() == nullptr;
 }

@@ -12,7 +12,7 @@
 #include "jscntxt.h"
 #include "jsfun.h"
 
-#include "jit/JitFrameIterator.h"
+#include "jit/JSJitFrameIter.h"
 #include "jit/Safepoints.h"
 
 namespace js {
@@ -287,9 +287,6 @@ void EnsureBareExitFrame(JSContext* cx, JitFrameLayout* frame);
 
 void TraceJitActivations(JSContext* cx, const CooperatingContext& target, JSTracer* trc);
 
-JSCompartment*
-TopmostIonActivationCompartment(JSContext* cx);
-
 void UpdateJitActivationsForMinorGC(JSRuntime* rt, JSTracer* trc);
 
 static inline uint32_t
@@ -314,17 +311,17 @@ MakeFrameDescriptor(uint32_t frameSize, FrameType type, uint32_t headerSize)
 inline JSScript*
 GetTopJitJSScript(JSContext* cx)
 {
-    JitFrameIterator iter(cx);
-    MOZ_ASSERT(iter.type() == JitFrame_Exit);
-    ++iter;
+    JSJitFrameIter frame(cx);
+    MOZ_ASSERT(frame.type() == JitFrame_Exit);
+    ++frame;
 
-    if (iter.isBaselineStub()) {
-        ++iter;
-        MOZ_ASSERT(iter.isBaselineJS());
+    if (frame.isBaselineStub()) {
+        ++frame;
+        MOZ_ASSERT(frame.isBaselineJS());
     }
 
-    MOZ_ASSERT(iter.isScripted());
-    return iter.script();
+    MOZ_ASSERT(frame.isScripted());
+    return frame.script();
 }
 
 #ifdef JS_CODEGEN_MIPS32
@@ -1027,11 +1024,8 @@ GetPcScript(JSContext* cx, JSScript** scriptRes, jsbytecode** pcRes);
 CalleeToken
 TraceCalleeToken(JSTracer* trc, CalleeToken token);
 
-// The minimum stack size is two. Two slots are needed because INITGLEXICAL
-// (stack depth 1) is compiled as a SETPROP (stack depth 2) on the global
-// lexical scope. Baseline also requires one slot for this/argument type
-// checks.
-static const uint32_t MinJITStackSize = 2;
+// Baseline requires one slot for this/argument type checks.
+static const uint32_t MinJITStackSize = 1;
 
 } /* namespace jit */
 } /* namespace js */

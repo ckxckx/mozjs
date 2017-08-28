@@ -36,9 +36,11 @@ const size_t ChunkShift = 20;
 const size_t ChunkSize = size_t(1) << ChunkShift;
 const size_t ChunkMask = ChunkSize - 1;
 
-const size_t CellShift = 3;
-const size_t CellSize = size_t(1) << CellShift;
-const size_t CellMask = CellSize - 1;
+const size_t CellAlignShift = 3;
+const size_t CellAlignBytes = size_t(1) << CellAlignShift;
+const size_t CellAlignMask = CellAlignBytes - 1;
+
+const size_t CellBytesPerMarkBit = CellAlignBytes;
 
 /* These are magic constants derived from actual offsets in gc/Heap.h. */
 #ifdef JS_GC_SMALL_CHUNK_SIZE
@@ -56,12 +58,20 @@ const size_t ArenaHeaderSize = sizeof(size_t) + 2 * sizeof(uintptr_t) +
                                sizeof(size_t) + sizeof(uintptr_t);
 
 /*
- * Live objects are marked black. How many other additional colors are available
- * depends on the size of the GCThing. Objects marked gray are eligible for
- * cycle collection.
+ * Live objects are marked black or gray. Everything reachable from a JS root is
+ * marked black. Objects marked gray are eligible for cycle collection.
+ *
+ *    BlackBit:     GrayOrBlackBit:  Color:
+ *       0               0           white
+ *       0               1           gray
+ *       1               0           black
+ *       1               1           black
  */
-static const uint32_t BLACK = 0;
-static const uint32_t GRAY = 1;
+enum class ColorBit : uint32_t
+{
+    BlackBit = 0,
+    GrayOrBlackBit = 1
+};
 
 /*
  * The "location" field in the Chunk trailer is a enum indicating various roles
@@ -91,10 +101,14 @@ MOZ_ALWAYS_INLINE bool IsInsideNursery(const js::gc::Cell* cell);
 namespace JS {
 struct Zone;
 
-/* Default size for the generational nursery in bytes. */
+/*
+ * Default size for the generational nursery in bytes.
+ * This is the initial nursery size, when running in the browser this is
+ * updated by JS_SetGCParameter().
+ */
 const uint32_t DefaultNurseryBytes = 16 * js::gc::ChunkSize;
 
-/* Default maximum heap size in bytes to pass to JS_NewRuntime(). */
+/* Default maximum heap size in bytes to pass to JS_NewContext(). */
 const uint32_t DefaultHeapMaxBytes = 32 * 1024 * 1024;
 
 namespace shadow {
@@ -147,12 +161,13 @@ struct Zone
 
     GCState gcState() const { return gcState_; }
     bool wasGCStarted() const { return gcState_ != NoGC; }
-    bool isGCMarkingBlack() { return gcState_ == Mark; }
-    bool isGCMarkingGray() { return gcState_ == MarkGray; }
-    bool isGCSweeping() { return gcState_ == Sweep; }
-    bool isGCFinished() { return gcState_ == Finished; }
-    bool isGCCompacting() { return gcState_ == Compact; }
-    bool isGCSweepingOrCompacting() { return gcState_ == Sweep || gcState_ == Compact; }
+    bool isGCMarkingBlack() const { return gcState_ == Mark; }
+    bool isGCMarkingGray() const { return gcState_ == MarkGray; }
+    bool isGCSweeping() const { return gcState_ == Sweep; }
+    bool isGCFinished() const { return gcState_ == Finished; }
+    bool isGCCompacting() const { return gcState_ == Compact; }
+    bool isGCMarking() const { return gcState_ == Mark || gcState_ == MarkGray; }
+    bool isGCSweepingOrCompacting() const { return gcState_ == Sweep || gcState_ == Compact; }
 
     static MOZ_ALWAYS_INLINE JS::shadow::Zone* asShadowZone(JS::Zone* zone) {
         return reinterpret_cast<JS::shadow::Zone*>(zone);
@@ -299,11 +314,12 @@ GetGCThingMarkBitmap(const uintptr_t addr)
 }
 
 static MOZ_ALWAYS_INLINE void
-GetGCThingMarkWordAndMask(const uintptr_t addr, uint32_t color,
+GetGCThingMarkWordAndMask(const uintptr_t addr, ColorBit colorBit,
                           uintptr_t** wordp, uintptr_t* maskp)
 {
     MOZ_ASSERT(addr);
-    const size_t bit = (addr & js::gc::ChunkMask) / js::gc::CellSize + color;
+    const size_t bit = (addr & js::gc::ChunkMask) / js::gc::CellBytesPerMarkBit +
+                       static_cast<uint32_t>(colorBit);
     MOZ_ASSERT(bit < js::gc::ChunkMarkBitmapBits);
     uintptr_t* bitmap = GetGCThingMarkBitmap(addr);
     const uintptr_t nbits = sizeof(*bitmap) * CHAR_BIT;
@@ -323,12 +339,20 @@ GetGCThingZone(const uintptr_t addr)
 static MOZ_ALWAYS_INLINE bool
 TenuredCellIsMarkedGray(const Cell* cell)
 {
+    // Return true if GrayOrBlackBit is set and BlackBit is not set.
     MOZ_ASSERT(cell);
     MOZ_ASSERT(!js::gc::IsInsideNursery(cell));
 
-    uintptr_t* word, mask;
-    js::gc::detail::GetGCThingMarkWordAndMask(uintptr_t(cell), js::gc::GRAY, &word, &mask);
-    return *word & mask;
+    uintptr_t* grayWord, grayMask;
+    js::gc::detail::GetGCThingMarkWordAndMask(uintptr_t(cell), js::gc::ColorBit::GrayOrBlackBit,
+                                              &grayWord, &grayMask);
+    if (!(*grayWord & grayMask))
+        return false;
+
+    uintptr_t* blackWord, blackMask;
+    js::gc::detail::GetGCThingMarkWordAndMask(uintptr_t(cell), js::gc::ColorBit::BlackBit,
+                                              &blackWord, &blackMask);
+    return !(*blackWord & blackMask);
 }
 
 static MOZ_ALWAYS_INLINE bool
@@ -383,6 +407,9 @@ GetStringZone(JSString* str)
 
 extern JS_PUBLIC_API(Zone*)
 GetObjectZone(JSObject* obj);
+
+extern JS_PUBLIC_API(Zone*)
+GetValueZone(const Value& value);
 
 static MOZ_ALWAYS_INLINE bool
 GCThingIsMarkedGray(GCCellPtr thing)

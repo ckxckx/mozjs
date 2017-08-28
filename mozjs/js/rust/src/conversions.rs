@@ -609,7 +609,7 @@ impl<C: Clone, T: FromJSValConvertible<Config=C>> FromJSValConvertible for Vec<T
             iterator: JS::RootedObject::new_unrooted(),
             index: ::std::u32::MAX, // NOT_ARRAY
         };
-        let mut iterator = ForOfIteratorGuard::new(cx, &mut iterator);
+        let iterator = ForOfIteratorGuard::new(cx, &mut iterator);
         let iterator = &mut *iterator.root;
 
         if !iterator.init(value, JS::ForOfIterator_NonIterableBehavior::AllowNonIterable) {

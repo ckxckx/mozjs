@@ -37,8 +37,11 @@
 **      %ld, %lu, %lx, %lX, %lo - "long" versions of above
 **      %lld, %llu, %llx, %llX, %llo - "long long" versions of above
 **      %zd, %zo, %zu, %zx, %zX - size_t versions of above
-**      %Id, %Io, %Iu, %Ix, %IX - size_t versions of above (for Windows compat)
-**           You should use PRI*SIZE macros instead
+**      %Id, %Io, %Iu, %Ix, %IX - size_t versions of above (for Windows compat).
+**           Note that MSVC 2015 and newer supports the z length modifier so
+**           users should prefer using %z instead of %I. We are supporting %I in
+**           addition to %z in case third-party code that uses %I gets routed to
+**           use this printf implementation.
 **      %s - string
 **      %S, %ls - wide string, that is wchar_t*
 **      %c - character
@@ -53,7 +56,6 @@
 #include "mozilla/Assertions.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/IntegerPrintfMacros.h"
-#include "mozilla/SizePrintfMacros.h"
 #include "mozilla/Types.h"
 #include "mozilla/UniquePtr.h"
 
@@ -73,7 +75,7 @@ public:
     bool MFBT_API print(const char* format, ...) MOZ_FORMAT_PRINTF(2, 3);
 
     /* The Vprintf-like interface.  */
-    bool MFBT_API vprint(const char* format, va_list);
+    bool MFBT_API vprint(const char* format, va_list) MOZ_FORMAT_PRINTF(2, 0);
 
 protected:
     MFBT_API PrintfTarget();
@@ -140,7 +142,7 @@ class MOZ_STACK_CLASS SprintfState final : private mozilla::PrintfTarget, privat
         this->free_(mBase);
     }
 
-    bool vprint(const char* format, va_list ap_list) {
+    bool vprint(const char* format, va_list ap_list) MOZ_FORMAT_PRINTF(2, 0) {
         // The "" here has a single \0 character, which is what we're
         // trying to append.
         return mozilla::PrintfTarget::vprint(format, ap_list) && append("", 1);
@@ -234,6 +236,7 @@ SmprintfPolicyPointer<AllocPolicy> SmprintfAppend(SmprintfPolicyPointer<AllocPol
 ** va_list forms of the above.
 */
 template<typename AllocPolicy = mozilla::MallocAllocPolicy>
+MOZ_FORMAT_PRINTF(1, 0)
 SmprintfPolicyPointer<AllocPolicy> Vsmprintf(const char* fmt, va_list ap)
 {
     SprintfState<AllocPolicy> ss(nullptr);
@@ -243,6 +246,7 @@ SmprintfPolicyPointer<AllocPolicy> Vsmprintf(const char* fmt, va_list ap)
 }
 
 template<typename AllocPolicy = mozilla::MallocAllocPolicy>
+MOZ_FORMAT_PRINTF(2, 0)
 SmprintfPolicyPointer<AllocPolicy> VsmprintfAppend(SmprintfPolicyPointer<AllocPolicy>&& last,
                                                    const char* fmt, va_list ap)
 {
@@ -250,16 +254,6 @@ SmprintfPolicyPointer<AllocPolicy> VsmprintfAppend(SmprintfPolicyPointer<AllocPo
     if (!ss.vprint(fmt, ap))
         return nullptr;
     return ss.release();
-}
-
-/*
-** Free the memory allocated, for the caller, by Smprintf.
-*/
-template<typename AllocPolicy = mozilla::MallocAllocPolicy>
-void SmprintfFree(char* mem)
-{
-    AllocPolicy allocator;
-    allocator.free_(mem);
 }
 
 } // namespace mozilla

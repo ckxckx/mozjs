@@ -33,16 +33,6 @@ CONFIGS = defaultdict(lambda: {
     'non_global_defines': [],
     'substs': {'OS_TARGET': 'WINNT'},
 }, {
-    'android_eclipse': {
-        'defines': {
-            'MOZ_ANDROID_MIN_SDK_VERSION': '15',
-        },
-        'non_global_defines': [],
-        'substs': {
-            'ANDROID_TARGET_SDK': '16',
-            'MOZ_WIDGET_TOOLKIT': 'android',
-        },
-    },
     'binary-components': {
         'defines': {},
         'non_global_defines': [],
@@ -171,6 +161,15 @@ CONFIGS = defaultdict(lambda: {
             'MOZ_APP_NAME': 'my_app',
         },
     },
+    'prog-lib-c-only': {
+        'defines': {},
+        'non_global_defines': [],
+        'substs': {
+            'COMPILE_ENVIRONMENT': '1',
+            'LIB_SUFFIX': '.a',
+            'BIN_SUFFIX': '',
+        },
+    }
 })
 
 

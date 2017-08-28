@@ -213,9 +213,8 @@ const Class js::TypedProto::class_ = {
 static const ClassOps ScalarTypeDescrClassOps = {
     nullptr, /* addProperty */
     nullptr, /* delProperty */
-    nullptr, /* getProperty */
-    nullptr, /* setProperty */
     nullptr, /* enumerate */
+    nullptr, /* newEnumerate */
     nullptr, /* resolve */
     nullptr, /* mayResolve */
     TypeDescr::finalize,
@@ -320,9 +319,8 @@ ScalarTypeDescr::call(JSContext* cx, unsigned argc, Value* vp)
 static const ClassOps ReferenceTypeDescrClassOps = {
     nullptr, /* addProperty */
     nullptr, /* delProperty */
-    nullptr, /* getProperty */
-    nullptr, /* setProperty */
     nullptr, /* enumerate */
+    nullptr, /* newEnumerate */
     nullptr, /* resolve */
     nullptr, /* mayResolve */
     TypeDescr::finalize,
@@ -508,9 +506,8 @@ CreatePrototypeObjectForComplexTypeInstance(JSContext* cx, HandleObject ctorProt
 static const ClassOps ArrayTypeDescrClassOps = {
     nullptr, /* addProperty */
     nullptr, /* delProperty */
-    nullptr, /* getProperty */
-    nullptr, /* setProperty */
     nullptr, /* enumerate */
+    nullptr, /* newEnumerate */
     nullptr, /* resolve */
     nullptr, /* mayResolve */
     TypeDescr::finalize,
@@ -745,9 +742,8 @@ js::IsTypedObjectArray(JSObject& obj)
 static const ClassOps StructTypeDescrClassOps = {
     nullptr, /* addProperty */
     nullptr, /* delProperty */
-    nullptr, /* getProperty */
-    nullptr, /* setProperty */
     nullptr, /* enumerate */
+    nullptr, /* newEnumerate */
     nullptr, /* resolve */
     nullptr, /* mayResolve */
     TypeDescr::finalize,
@@ -2027,8 +2023,8 @@ TypedObject::obj_deleteProperty(JSContext* cx, HandleObject obj, HandleId id, Ob
 }
 
 bool
-TypedObject::obj_enumerate(JSContext* cx, HandleObject obj, AutoIdVector& properties,
-                           bool enumerableOnly)
+TypedObject::obj_newEnumerate(JSContext* cx, HandleObject obj, AutoIdVector& properties,
+                              bool enumerableOnly)
 {
     MOZ_ASSERT(obj->is<TypedObject>());
     Rooted<TypedObject*> typedObj(cx, &obj->as<TypedObject>());
@@ -2220,7 +2216,6 @@ const ObjectOps TypedObject::objectOps_ = {
     TypedObject::obj_deleteProperty,
     nullptr, nullptr, /* watch/unwatch */
     nullptr,   /* getElements */
-    TypedObject::obj_enumerate,
     nullptr, /* thisValue */
 };
 
@@ -2228,9 +2223,8 @@ const ObjectOps TypedObject::objectOps_ = {
     static const ClassOps Name##ClassOps = {             \
         nullptr,        /* addProperty */                \
         nullptr,        /* delProperty */                \
-        nullptr,        /* getProperty */                \
-        nullptr,        /* setProperty */                \
         nullptr,        /* enumerate   */                \
+        TypedObject::obj_newEnumerate,                   \
         nullptr,        /* resolve     */                \
         nullptr,        /* mayResolve  */                \
         nullptr,        /* finalize    */                \

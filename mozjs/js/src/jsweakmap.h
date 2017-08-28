@@ -108,7 +108,7 @@ class WeakMapBase : public mozilla::LinkedListElement<WeakMapBase>
 };
 
 template <typename T>
-static T extractUnbarriered(WriteBarrieredBase<T> v)
+static T extractUnbarriered(const WriteBarrieredBase<T>& v)
 {
     return v.get();
 }
@@ -200,7 +200,12 @@ class WeakMap : public HashMap<Key, Value, HashPolicy, RuntimeAllocPolicy>,
     }
 
     void trace(JSTracer* trc) override {
-        MOZ_ASSERT(isInList());
+        MOZ_ASSERT_IF(JS::CurrentThreadIsHeapBusy(), isInList());
+
+        TraceNullableEdge(trc, &memberOf, "WeakMap owner");
+
+        if (!Base::initialized())
+            return;
 
         if (trc->isMarkingTracer()) {
             MOZ_ASSERT(trc->weakMapAction() == ExpandWeakMaps);

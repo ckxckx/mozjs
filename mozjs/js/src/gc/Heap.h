@@ -48,10 +48,6 @@ extern bool
 CurrentThreadIsIonCompiling();
 #endif
 
-// The return value indicates if anything was unmarked.
-extern bool
-UnmarkGrayCellRecursively(gc::Cell* cell, JS::TraceKind kind);
-
 extern void
 TraceManuallyBarrieredGenericPointerEdge(JSTracer* trc, gc::Cell** thingp, const char* name);
 
@@ -242,6 +238,13 @@ FOR_EACH_ALLOCKIND(EXPAND_ELEMENT)
 static const size_t MAX_BACKGROUND_FINALIZE_KINDS =
     size_t(AllocKind::LIMIT) - size_t(AllocKind::OBJECT_LIMIT) / 2;
 
+/* Mark colors to pass to markIfUnmarked. */
+enum class MarkColor : uint32_t
+{
+    Black = 0,
+    Gray
+};
+
 class TenuredCell;
 
 // A GC cell is the base class for all GC things.
@@ -252,6 +255,10 @@ struct Cell
     MOZ_ALWAYS_INLINE const TenuredCell& asTenured() const;
     MOZ_ALWAYS_INLINE TenuredCell& asTenured();
 
+    MOZ_ALWAYS_INLINE bool isMarkedAny() const;
+    MOZ_ALWAYS_INLINE bool isMarkedBlack() const;
+    MOZ_ALWAYS_INLINE bool isMarkedGray() const;
+
     inline JSRuntime* runtimeFromActiveCooperatingThread() const;
 
     // Note: Unrestricted access to the runtime of a GC thing from an arbitrary
@@ -261,6 +268,8 @@ struct Cell
     // May be overridden by GC thing kinds that have a compartment pointer.
     inline JSCompartment* maybeCompartment() const { return nullptr; }
 
+    // The StoreBuffer used to record incoming pointers from the tenured heap.
+    // This will return nullptr for a tenured cell.
     inline StoreBuffer* storeBuffer() const;
 
     inline JS::TraceKind getTraceKind() const;
@@ -288,10 +297,13 @@ class TenuredCell : public Cell
     static MOZ_ALWAYS_INLINE const TenuredCell* fromPointer(const void* ptr);
 
     // Mark bit management.
-    MOZ_ALWAYS_INLINE bool isMarked(uint32_t color = BLACK) const;
+    MOZ_ALWAYS_INLINE bool isMarkedAny() const;
+    MOZ_ALWAYS_INLINE bool isMarkedBlack() const;
+    MOZ_ALWAYS_INLINE bool isMarkedGray() const;
+
     // The return value indicates if the cell went from unmarked to marked.
-    MOZ_ALWAYS_INLINE bool markIfUnmarked(uint32_t color = BLACK) const;
-    MOZ_ALWAYS_INLINE void unmark(uint32_t color) const;
+    MOZ_ALWAYS_INLINE bool markIfUnmarked(MarkColor color = MarkColor::Black) const;
+    MOZ_ALWAYS_INLINE void markBlack() const;
     MOZ_ALWAYS_INLINE void copyMarkBitsFrom(const TenuredCell* src);
 
     // Access to the arena.
@@ -323,24 +335,39 @@ class TenuredCell : public Cell
 #endif
 };
 
-/* Cells are aligned to CellShift, so the largest tagged null pointer is: */
-const uintptr_t LargestTaggedNullCellPointer = (1 << CellShift) - 1;
+/* Cells are aligned to CellAlignShift, so the largest tagged null pointer is: */
+const uintptr_t LargestTaggedNullCellPointer = (1 << CellAlignShift) - 1;
+
+/*
+ * The minimum cell size ends up as twice the cell alignment because the mark
+ * bitmap contains one bit per CellBytesPerMarkBit bytes (which is equal to
+ * CellAlignBytes) and we need two mark bits per cell.
+ */
+const size_t MarkBitsPerCell = 2;
+const size_t MinCellSize = CellBytesPerMarkBit * MarkBitsPerCell;
 
 constexpr size_t
 DivideAndRoundUp(size_t numerator, size_t divisor) {
     return (numerator + divisor - 1) / divisor;
 }
 
-const size_t ArenaCellCount = ArenaSize / CellSize;
-static_assert(ArenaSize % CellSize == 0, "Arena size must be a multiple of cell size");
+static_assert(ArenaSize % CellAlignBytes == 0,
+              "Arena size must be a multiple of cell alignment");
 
 /*
- * The mark bitmap has one bit per each GC cell. For multi-cell GC things this
- * wastes space but allows to avoid expensive devisions by thing's size when
- * accessing the bitmap. In addition this allows to use some bits for colored
- * marking during the cycle GC.
+ * We sometimes use an index to refer to a cell in an arena. The index for a
+ * cell is found by dividing by the cell alignment so not all indicies refer to
+ * valid cells.
  */
-const size_t ArenaBitmapBits = ArenaCellCount;
+const size_t ArenaCellIndexBytes = CellAlignBytes;
+const size_t MaxArenaCellIndex = ArenaSize / CellAlignBytes;
+
+/*
+ * The mark bitmap has one bit per each possible cell start position. This
+ * wastes some space for larger GC things but allows us to avoid division by the
+ * cell's size when accessing the bitmap.
+ */
+const size_t ArenaBitmapBits = ArenaSize / CellBytesPerMarkBit;
 const size_t ArenaBitmapBytes = DivideAndRoundUp(ArenaBitmapBits, 8);
 const size_t ArenaBitmapWords = DivideAndRoundUp(ArenaBitmapBits, JS_BITS_PER_WORD);
 
@@ -433,7 +460,6 @@ class FreeSpan
         }
         checkSpan(arena);
         JS_EXTRA_POISON(reinterpret_cast<void*>(thing), JS_ALLOCATED_TENURED_PATTERN, thingSize);
-        MemProfiler::SampleTenured(reinterpret_cast<void*>(thing), thingSize);
         return reinterpret_cast<TenuredCell*>(thing);
     }
 
@@ -769,25 +795,26 @@ FreeSpan::checkRange(uintptr_t first, uintptr_t last, const Arena* arena) const
  */
 struct ChunkTrailer
 {
-    /* Construct a Nursery ChunkTrailer. */
+    // Construct a Nursery ChunkTrailer.
     ChunkTrailer(JSRuntime* rt, StoreBuffer* sb)
       : location(ChunkLocation::Nursery), storeBuffer(sb), runtime(rt)
     {}
 
-    /* Construct a Tenured heap ChunkTrailer. */
+    // Construct a Tenured heap ChunkTrailer.
     explicit ChunkTrailer(JSRuntime* rt)
       : location(ChunkLocation::TenuredHeap), storeBuffer(nullptr), runtime(rt)
     {}
 
   public:
-    /* The index the chunk in the nursery, or LocationTenuredHeap. */
+    // The index of the chunk in the nursery, or LocationTenuredHeap.
     ChunkLocation   location;
     uint32_t        padding;
 
-    /* The store buffer for writes to things in this chunk or nullptr. */
+    // The store buffer for pointers from tenured things to things in this
+    // chunk. Will be non-null only for nursery chunks.
     StoreBuffer*    storeBuffer;
 
-    /* This provides quick access to the runtime from absolutely anywhere. */
+    // Provide quick access to the runtime from absolutely anywhere.
     JSRuntime*      runtime;
 };
 
@@ -872,6 +899,15 @@ static_assert(ArenasPerChunk == 62, "Do not accidentally change our heap's densi
 static_assert(ArenasPerChunk == 252, "Do not accidentally change our heap's density.");
 #endif
 
+static inline void
+AssertValidColorBit(const TenuredCell* thing, ColorBit colorBit)
+{
+#ifdef DEBUG
+    Arena* arena = thing->arena();
+    MOZ_ASSERT(unsigned(colorBit) < arena->getThingSize() / CellBytesPerMarkBit);
+#endif
+}
+
 /* A chunk bitmap contains enough mark bits for all the cells in a chunk. */
 struct ChunkBitmap
 {
@@ -880,31 +916,45 @@ struct ChunkBitmap
   public:
     ChunkBitmap() { }
 
-    MOZ_ALWAYS_INLINE void getMarkWordAndMask(const Cell* cell, uint32_t color,
+    MOZ_ALWAYS_INLINE void getMarkWordAndMask(const TenuredCell* cell, ColorBit colorBit,
                                               uintptr_t** wordp, uintptr_t* maskp)
     {
-        detail::GetGCThingMarkWordAndMask(uintptr_t(cell), color, wordp, maskp);
+        detail::GetGCThingMarkWordAndMask(uintptr_t(cell), colorBit, wordp, maskp);
     }
 
-    MOZ_ALWAYS_INLINE MOZ_TSAN_BLACKLIST bool isMarked(const Cell* cell, uint32_t color) {
+    MOZ_ALWAYS_INLINE MOZ_TSAN_BLACKLIST bool markBit(const TenuredCell* cell, ColorBit colorBit) {
+        AssertValidColorBit(cell, colorBit);
         uintptr_t* word, mask;
-        getMarkWordAndMask(cell, color, &word, &mask);
+        getMarkWordAndMask(cell, colorBit, &word, &mask);
         return *word & mask;
     }
 
+    MOZ_ALWAYS_INLINE MOZ_TSAN_BLACKLIST bool isMarkedAny(const TenuredCell* cell) {
+        return markBit(cell, ColorBit::BlackBit) || markBit(cell, ColorBit::GrayOrBlackBit);
+    }
+
+    MOZ_ALWAYS_INLINE MOZ_TSAN_BLACKLIST bool isMarkedBlack(const TenuredCell* cell) {
+        return markBit(cell, ColorBit::BlackBit);
+    }
+
+    MOZ_ALWAYS_INLINE MOZ_TSAN_BLACKLIST bool isMarkedGray(const TenuredCell* cell) {
+        return !markBit(cell, ColorBit::BlackBit) && markBit(cell, ColorBit::GrayOrBlackBit);
+    }
+
     // The return value indicates if the cell went from unmarked to marked.
-    MOZ_ALWAYS_INLINE bool markIfUnmarked(const Cell* cell, uint32_t color) {
+    MOZ_ALWAYS_INLINE bool markIfUnmarked(const TenuredCell* cell, MarkColor color) {
         uintptr_t* word, mask;
-        getMarkWordAndMask(cell, BLACK, &word, &mask);
+        getMarkWordAndMask(cell, ColorBit::BlackBit, &word, &mask);
         if (*word & mask)
             return false;
-        *word |= mask;
-        if (color != BLACK) {
+        if (color == MarkColor::Black) {
+            *word |= mask;
+        } else {
             /*
              * We use getMarkWordAndMask to recalculate both mask and word as
              * doing just mask << color may overflow the mask.
              */
-            getMarkWordAndMask(cell, color, &word, &mask);
+            getMarkWordAndMask(cell, ColorBit::GrayOrBlackBit, &word, &mask);
             if (*word & mask)
                 return false;
             *word |= mask;
@@ -912,16 +962,23 @@ struct ChunkBitmap
         return true;
     }
 
-    MOZ_ALWAYS_INLINE void unmark(const Cell* cell, uint32_t color) {
+    MOZ_ALWAYS_INLINE void markBlack(const TenuredCell* cell) {
         uintptr_t* word, mask;
-        getMarkWordAndMask(cell, color, &word, &mask);
-        *word &= ~mask;
+        getMarkWordAndMask(cell, ColorBit::BlackBit, &word, &mask);
+        *word |= mask;
     }
 
-    MOZ_ALWAYS_INLINE void copyMarkBit(Cell* dst, const TenuredCell* src, uint32_t color) {
-        uintptr_t* word, mask;
-        getMarkWordAndMask(dst, color, &word, &mask);
-        *word = (*word & ~mask) | (src->isMarked(color) ? mask : 0);
+    MOZ_ALWAYS_INLINE void copyMarkBit(TenuredCell* dst, const TenuredCell* src,
+                                       ColorBit colorBit) {
+        uintptr_t* srcWord, srcMask;
+        getMarkWordAndMask(src, colorBit, &srcWord, &srcMask);
+
+        uintptr_t* dstWord, dstMask;
+        getMarkWordAndMask(dst, colorBit, &dstWord, &dstMask);
+
+        *dstWord &= ~dstMask;
+        if (*srcWord & srcMask)
+            *dstWord |= dstMask;
     }
 
     void clear() {
@@ -935,7 +992,8 @@ struct ChunkBitmap
                       "that covers bits from two arenas.");
 
         uintptr_t* word, unused;
-        getMarkWordAndMask(reinterpret_cast<Cell*>(arena->address()), BLACK, &word, &unused);
+        getMarkWordAndMask(reinterpret_cast<TenuredCell*>(arena->address()),
+                           ColorBit::BlackBit, &word, &unused);
         return word;
     }
 };
@@ -1111,15 +1169,6 @@ Arena::chunk() const
     return Chunk::fromAddress(address());
 }
 
-static void
-AssertValidColor(const TenuredCell* thing, uint32_t color)
-{
-#ifdef DEBUG
-    Arena* arena = thing->arena();
-    MOZ_ASSERT(color < arena->getThingSize() / CellSize);
-#endif
-}
-
 MOZ_ALWAYS_INLINE const TenuredCell&
 Cell::asTenured() const
 {
@@ -1132,6 +1181,24 @@ Cell::asTenured()
 {
     MOZ_ASSERT(isTenured());
     return *static_cast<TenuredCell*>(this);
+}
+
+MOZ_ALWAYS_INLINE bool
+Cell::isMarkedAny() const
+{
+    return !isTenured() || asTenured().isMarkedAny();
+}
+
+MOZ_ALWAYS_INLINE bool
+Cell::isMarkedBlack() const
+{
+    return !isTenured() || asTenured().isMarkedBlack();
+}
+
+MOZ_ALWAYS_INLINE bool
+Cell::isMarkedGray() const
+{
+    return isTenured() && asTenured().isMarkedGray();
 }
 
 inline JSRuntime*
@@ -1152,7 +1219,7 @@ inline uintptr_t
 Cell::address() const
 {
     uintptr_t addr = uintptr_t(this);
-    MOZ_ASSERT(addr % CellSize == 0);
+    MOZ_ASSERT(addr % CellAlignBytes == 0);
     MOZ_ASSERT(Chunk::withinValidRange(addr));
     return addr;
 }
@@ -1161,7 +1228,7 @@ Chunk*
 Cell::chunk() const
 {
     uintptr_t addr = uintptr_t(this);
-    MOZ_ASSERT(addr % CellSize == 0);
+    MOZ_ASSERT(addr % CellAlignBytes == 0);
     addr &= ~ChunkMask;
     return reinterpret_cast<Chunk*>(addr);
 }
@@ -1206,34 +1273,44 @@ TenuredCell::fromPointer(const void* ptr)
 }
 
 bool
-TenuredCell::isMarked(uint32_t color /* = BLACK */) const
+TenuredCell::isMarkedAny() const
 {
     MOZ_ASSERT(arena()->allocated());
-    AssertValidColor(this, color);
-    return chunk()->bitmap.isMarked(this, color);
+    return chunk()->bitmap.isMarkedAny(this);
 }
 
 bool
-TenuredCell::markIfUnmarked(uint32_t color /* = BLACK */) const
+TenuredCell::isMarkedBlack() const
 {
-    AssertValidColor(this, color);
+    MOZ_ASSERT(arena()->allocated());
+    return chunk()->bitmap.isMarkedBlack(this);
+}
+
+bool
+TenuredCell::isMarkedGray() const
+{
+    MOZ_ASSERT(arena()->allocated());
+    return chunk()->bitmap.isMarkedGray(this);
+}
+
+bool
+TenuredCell::markIfUnmarked(MarkColor color /* = Black */) const
+{
     return chunk()->bitmap.markIfUnmarked(this, color);
 }
 
 void
-TenuredCell::unmark(uint32_t color) const
+TenuredCell::markBlack() const
 {
-    MOZ_ASSERT(color != BLACK);
-    AssertValidColor(this, color);
-    chunk()->bitmap.unmark(this, color);
+    chunk()->bitmap.markBlack(this);
 }
 
 void
 TenuredCell::copyMarkBitsFrom(const TenuredCell* src)
 {
     ChunkBitmap& bitmap = chunk()->bitmap;
-    bitmap.copyMarkBit(this, src, BLACK);
-    bitmap.copyMarkBit(this, src, GRAY);
+    bitmap.copyMarkBit(this, src, ColorBit::BlackBit);
+    bitmap.copyMarkBit(this, src, ColorBit::GrayOrBlackBit);
 }
 
 inline Arena*
@@ -1282,6 +1359,7 @@ TenuredCell::readBarrier(TenuredCell* thing)
 {
     MOZ_ASSERT(!CurrentThreadIsIonCompiling());
     MOZ_ASSERT(thing);
+    MOZ_ASSERT(CurrentThreadCanAccessZone(thing->zoneFromAnyThread()));
 
     // It would be good if barriers were never triggered during collection, but
     // at the moment this can happen e.g. when rekeying tables containing
@@ -1299,11 +1377,11 @@ TenuredCell::readBarrier(TenuredCell* thing)
         MOZ_ASSERT(tmp == thing);
     }
 
-    if (thing->isMarked(GRAY)) {
+    if (thing->isMarkedGray()) {
         // There shouldn't be anything marked grey unless we're on the active thread.
         MOZ_ASSERT(CurrentThreadCanAccessRuntime(thing->runtimeFromAnyThread()));
         if (!RuntimeFromActiveCooperatingThreadIsHeapMajorCollecting(shadowZone))
-            UnmarkGrayCellRecursively(thing, thing->getTraceKind());
+            JS::UnmarkGrayGCThingRecursively(JS::GCCellPtr(thing, thing->getTraceKind()));
     }
 }
 
@@ -1380,8 +1458,8 @@ namespace debug {
 
 // Utility functions meant to be called from an interactive debugger.
 enum class MarkInfo : int {
-    BLACK = js::gc::BLACK,
-    GRAY = js::gc::GRAY,
+    BLACK = 0,
+    GRAY = 1,
     UNMARKED = -1,
     NURSERY = -2,
 };
@@ -1415,10 +1493,10 @@ GetMarkInfo(js::gc::Cell* cell);
 MOZ_NEVER_INLINE uintptr_t*
 GetMarkWordAddress(js::gc::Cell* cell);
 
-// Return the mask for the given cell and color, or 0 if the cell is in the
+// Return the mask for the given cell and color bit, or 0 if the cell is in the
 // nursery.
 MOZ_NEVER_INLINE uintptr_t
-GetMarkMask(js::gc::Cell* cell, uint32_t color);
+GetMarkMask(js::gc::Cell* cell, uint32_t colorBit);
 
 } /* namespace debug */
 } /* namespace js */

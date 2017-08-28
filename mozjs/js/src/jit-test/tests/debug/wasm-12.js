@@ -1,12 +1,13 @@
+// |jit-test| test-also-no-wasm-baseline
 // Tests that wasm module scripts have special URLs.
 
-if (!wasmIsSupported())
+if (!wasmDebuggingIsSupported())
   quit();
 
 var g = newGlobal();
 g.eval(`
 function initWasm(s) { return new WebAssembly.Instance(new WebAssembly.Module(wasmTextToBinary(s))); }
-o = initWasm('(module (func) (export "" 0))');
+o1 = initWasm('(module (func) (export "" 0))');
 o2 = initWasm('(module (func) (func) (export "" 1))');
 `);
 
@@ -14,7 +15,7 @@ function isWasm(script) { return script.format === "wasm"; }
 
 function isValidWasmURL(url) {
    // The URLs will have the following format:
-   //   wasm: [<uri-econded-filename-of-host> ":"] <64-bit-hash>
+   //   wasm: [<uri-encoded-filename-of-host> ":"] <64-bit-hash>
    return /^wasm:(?:[^:]*:)*?[0-9a-f]{16}$/.test(url);
 }
 

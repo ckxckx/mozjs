@@ -12,6 +12,9 @@ CONFIGURE_SUBST_FILES += [
 if not CONFIG['JS_STANDALONE']:
     LIBRARY_DEFINES['MOZ_HAS_MOZGLUE'] = True
 
+if CONFIG['JS_STANDALONE'] and not CONFIG['MOZ_MEMORY']:
+    USE_LIBS += ["mozglue"]
+
 # JavaScript must be built shared, even for static builds, as it is used by
 # other modules which are always built shared. Failure to do so results in
 # the js code getting copied into xpinstall and jsd as well as mozilla-bin,

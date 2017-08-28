@@ -240,6 +240,10 @@ typedef HashMap<JSScript*,
                 ScriptCounts*,
                 DefaultHasher<JSScript*>,
                 SystemAllocPolicy> ScriptCountsMap;
+typedef HashMap<JSScript*,
+                const char*,
+                DefaultHasher<JSScript*>,
+                SystemAllocPolicy> ScriptNameMap;
 
 class DebugScript
 {
@@ -483,6 +487,7 @@ class ScriptSource
     // possible to get source at all.
     bool sourceRetrievable_:1;
     bool hasIntroductionOffset_:1;
+    bool containsAsmJS_:1;
 
     const char16_t* chunkChars(JSContext* cx, UncompressedSourceCache::AutoHoldEntry& holder,
                                size_t chunk);
@@ -498,6 +503,10 @@ class ScriptSource
     void movePendingCompressedSource();
 
   public:
+    // When creating a JSString* from TwoByte source characters, we don't try to
+    // to deflate to Latin1 for longer strings, because this can be slow.
+    static const size_t SourceDeflateLimit = 100;
+
     explicit ScriptSource()
       : refs(0),
         data(SourceType(Missing())),
@@ -512,7 +521,8 @@ class ScriptSource
         introductionType_(nullptr),
         xdrEncoder_(nullptr),
         sourceRetrievable_(false),
-        hasIntroductionOffset_(false)
+        hasIntroductionOffset_(false),
+        containsAsmJS_(false)
     {
     }
 
@@ -559,6 +569,8 @@ class ScriptSource
 
     JSFlatString* substring(JSContext* cx, size_t start, size_t stop);
     JSFlatString* substringDontDeflate(JSContext* cx, size_t start, size_t stop);
+
+    MOZ_MUST_USE bool appendSubstring(JSContext* cx, js::StringBuffer& buf, size_t start, size_t stop);
 
     bool isFunctionBody() {
         return parameterListEnd_ != 0;
@@ -630,6 +642,11 @@ class ScriptSource
         hasIntroductionOffset_ = true;
     }
 
+    bool containsAsmJS() const { return containsAsmJS_; }
+    void setContainsAsmJS() {
+        containsAsmJS_ = true;
+    }
+
     // Return wether an XDR encoder is present or not.
     bool hasEncoder() const { return bool(xdrEncoder_); }
 
@@ -637,7 +654,7 @@ class ScriptSource
     // of the encoding would be available in the |buffer| provided as argument,
     // as soon as |xdrFinalize| is called and all xdr function calls returned
     // successfully.
-    bool xdrEncodeTopLevel(JSContext* cx, JS::TranscodeBuffer& buffer, HandleScript script);
+    bool xdrEncodeTopLevel(JSContext* cx, HandleScript script);
 
     // Encode a delazified JSFunction.  In case of errors, the XDR encoder is
     // freed and the |buffer| provided as argument to |xdrEncodeTopLevel| is
@@ -651,7 +668,7 @@ class ScriptSource
     // Linearize the encoded content in the |buffer| provided as argument to
     // |xdrEncodeTopLevel|, and free the XDR encoder.  In case of errors, the
     // |buffer| is considered undefined.
-    bool xdrFinalizeEncoder();
+    bool xdrFinalizeEncoder(JS::TranscodeBuffer& buffer);
 
     const mozilla::TimeStamp parseEnded() const {
         return parseEnded_;
@@ -976,7 +993,7 @@ class JSScript : public js::gc::TenuredCell
     // Unique Method ID passed to the VTune profiler, or 0 if unset.
     // Allows attribution of different jitcode to the same source script.
     uint32_t        vtuneMethodId_;
-    // Extra padding to maintain JSScript as a multiple of gc::CellSize.
+    // Extra padding to maintain JSScript as a multiple of gc::CellAlignBytes.
     uint32_t        __vtune_unused_padding_;
 #endif
 
@@ -1408,6 +1425,7 @@ class JSScript : public js::gc::TenuredCell
     void setIsDefaultClassConstructor() { isDefaultClassConstructor_ = true; }
 
     bool hasScriptCounts() const { return hasScriptCounts_; }
+    bool hasScriptName();
 
     bool hasFreezeConstraints() const { return hasFreezeConstraints_; }
     void setHasFreezeConstraints() { hasFreezeConstraints_ = true; }
@@ -1596,6 +1614,7 @@ class JSScript : public js::gc::TenuredCell
     bool isRelazifiable() const {
         return (selfHosted() || lazyScript) && !hasInnerFunctions_ && !types_ &&
                !isStarGenerator() && !isLegacyGenerator() && !isAsync() &&
+               !isDefaultClassConstructor() &&
                !hasBaselineScript() && !hasAnyIonScript() &&
                !doNotRelazify_;
     }
@@ -1644,7 +1663,8 @@ class JSScript : public js::gc::TenuredCell
     bool mayReadFrameArgsDirectly();
 
     static JSFlatString* sourceData(JSContext* cx, JS::HandleScript script);
-    static JSFlatString* sourceDataForToString(JSContext* cx, JS::HandleScript script);
+
+    MOZ_MUST_USE bool appendSourceDataForToString(JSContext* cx, js::StringBuffer& buf);
 
     static bool loadSource(JSContext* cx, js::ScriptSource* ss, bool* worked);
 
@@ -1770,7 +1790,9 @@ class JSScript : public js::gc::TenuredCell
 
   public:
     bool initScriptCounts(JSContext* cx);
+    bool initScriptName(JSContext* cx);
     js::ScriptCounts& getScriptCounts();
+    const char* getScriptName();
     js::PCCounts* maybeGetPCCounts(jsbytecode* pc);
     const js::PCCounts* maybeGetThrowCounts(jsbytecode* pc);
     js::PCCounts* getThrowCounts(jsbytecode* pc);
@@ -1780,6 +1802,7 @@ class JSScript : public js::gc::TenuredCell
     js::jit::IonScriptCounts* getIonCounts();
     void releaseScriptCounts(js::ScriptCounts* counts);
     void destroyScriptCounts(js::FreeOp* fop);
+    void destroyScriptName();
     // The entry should be removed after using this function.
     void takeOverScriptCountsMapEntry(js::ScriptCounts* entryValue);
 
@@ -2052,8 +2075,8 @@ class JSScript : public js::gc::TenuredCell
 };
 
 /* If this fails, add/remove padding within JSScript. */
-static_assert(sizeof(JSScript) % js::gc::CellSize == 0,
-              "Size of JSScript must be an integral multiple of js::gc::CellSize");
+static_assert(sizeof(JSScript) % js::gc::CellAlignBytes == 0,
+              "Size of JSScript must be an integral multiple of js::gc::CellAlignBytes");
 
 namespace js {
 
@@ -2395,8 +2418,8 @@ class LazyScript : public gc::TenuredCell
 };
 
 /* If this fails, add/remove padding within LazyScript. */
-static_assert(sizeof(LazyScript) % js::gc::CellSize == 0,
-              "Size of LazyScript must be an integral multiple of js::gc::CellSize");
+static_assert(sizeof(LazyScript) % js::gc::CellAlignBytes == 0,
+              "Size of LazyScript must be an integral multiple of js::gc::CellAlignBytes");
 
 struct ScriptAndCounts
 {

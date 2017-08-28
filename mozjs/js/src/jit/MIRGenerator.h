@@ -53,13 +53,16 @@ class MIRGenerator
         return alloc().ensureBallast();
     }
     const JitRuntime* jitRuntime() const {
-        return GetJitContext()->runtime->jitRuntime();
+        return runtime->jitRuntime();
     }
     const CompileInfo& info() const {
         return *info_;
     }
     const OptimizationInfo& optimizationInfo() const {
         return *optimizationInfo_;
+    }
+    bool hasProfilingScripts() const {
+        return runtime && runtime->profilingScripts();
     }
 
     template <typename T>
@@ -77,7 +80,7 @@ class MIRGenerator
     abort(AbortReason r, const char* message, ...) MOZ_FORMAT_PRINTF(3, 4);
 
     mozilla::GenericErrorResult<AbortReason>
-    abortFmt(AbortReason r, const char* message, va_list ap);
+    abortFmt(AbortReason r, const char* message, va_list ap) MOZ_FORMAT_PRINTF(3, 0);
 
     // Collect the evaluation result of phases after IonBuilder, such that
     // off-thread compilation can report what error got encountered.
@@ -91,7 +94,7 @@ class MIRGenerator
 
     MOZ_MUST_USE bool instrumentedProfiling() {
         if (!instrumentedProfilingIsCached_) {
-            instrumentedProfiling_ = GetJitContext()->runtime->geckoProfiler().enabled();
+            instrumentedProfiling_ = runtime->geckoProfiler().enabled();
             instrumentedProfilingIsCached_ = true;
         }
         return instrumentedProfiling_;
@@ -179,6 +182,7 @@ class MIRGenerator
 
   public:
     CompileCompartment* compartment;
+    CompileRuntime* runtime;
 
   protected:
     const CompileInfo* info_;

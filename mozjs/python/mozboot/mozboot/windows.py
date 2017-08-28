@@ -8,18 +8,6 @@ import subprocess
 
 from mozboot.base import BaseBootstrapper
 
-STYLO_MOZCONFIG = '''
-To enable Stylo in your builds, paste the lines between the chevrons
-(>>> and <<<) into your mozconfig file:
-
-<<<
-ac_add_options --enable-stylo
-
-ac_add_options --with-libclang-path={state_dir}/clang/lib
-ac_add_options --with-clang-path={state_dir}/clang/bin/clang.exe
->>>
-'''
-
 
 class WindowsBootstrapper(BaseBootstrapper):
     '''Bootstrapper for msys2 based environments for building in Windows.'''
@@ -80,13 +68,9 @@ class WindowsBootstrapper(BaseBootstrapper):
     def install_mobile_android_artifact_mode_packages(self):
         raise NotImplementedError('We do not support building Android on Windows. Sorry!')
 
-    def suggest_browser_mozconfig(self):
-        if self.stylo:
-            print(STYLO_MOZCONFIG.format(state_dir=self.state_dir))
-
-    def ensure_stylo_packages(self, state_dir):
+    def ensure_stylo_packages(self, state_dir, checkout_root):
         import stylo
-        self.install_tooltool_clang_package(state_dir, **stylo.WINDOWS)
+        self.install_tooltool_clang_package(state_dir, checkout_root, stylo.WINDOWS)
 
     def _update_package_manager(self):
         self.pacman_update()

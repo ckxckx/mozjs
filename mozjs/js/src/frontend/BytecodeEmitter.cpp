@@ -55,6 +55,7 @@ using mozilla::Nothing;
 using mozilla::NumberIsInt32;
 using mozilla::PodCopy;
 using mozilla::Some;
+using mozilla::Unused;
 
 class BreakableControl;
 class LabelControl;
@@ -757,6 +758,7 @@ BytecodeEmitter::EmitterScope::searchInEnclosingScope(JSAtom* name, Scope* scope
           case ScopeKind::NonSyntactic:
             return NameLocation::Dynamic();
 
+          case ScopeKind::WasmInstance:
           case ScopeKind::WasmFunction:
             MOZ_CRASH("No direct eval inside wasm functions");
         }
@@ -1457,6 +1459,7 @@ BytecodeEmitter::EmitterScope::leave(BytecodeEmitter* bce, bool nonLocal)
       case ScopeKind::Module:
         break;
 
+      case ScopeKind::WasmInstance:
       case ScopeKind::WasmFunction:
         MOZ_CRASH("No wasm function scopes in JS");
     }
@@ -2280,11 +2283,6 @@ BytecodeEmitter::emitCheck(ptrdiff_t delta, ptrdiff_t* offset)
 {
     *offset = code().length();
 
-    // Start it off moderately large to avoid repeated resizings early on.
-    // ~98% of cases fit within 1024 bytes.
-    if (code().capacity() == 0 && !code().reserve(1024))
-        return false;
-
     if (!code().growBy(delta)) {
         ReportOutOfMemory(cx);
         return false;
@@ -2297,8 +2295,8 @@ BytecodeEmitter::updateDepth(ptrdiff_t target)
 {
     jsbytecode* pc = code(target);
 
-    int nuses = StackUses(nullptr, pc);
-    int ndefs = StackDefs(nullptr, pc);
+    int nuses = StackUses(pc);
+    int ndefs = StackDefs(pc);
 
     stackDepth -= nuses;
     MOZ_ASSERT(stackDepth >= 0);
@@ -3658,7 +3656,10 @@ BytecodeEmitter::reportExtraWarning(ParseNode* pn, unsigned errorNumber, ...)
     va_list args;
     va_start(args, errorNumber);
 
-    bool result = parser.reportExtraWarningErrorNumberVA(nullptr, pos.begin, errorNumber, args);
+    // FIXME: parser.tokenStream() should be a TokenStreamAnyChars for bug 1351107,
+    // but caused problems, cf. bug 1363116.
+    bool result = parser.tokenStream()
+                        .reportExtraWarningErrorNumberVA(nullptr, pos.begin, errorNumber, args);
 
     va_end(args);
     return result;
@@ -3671,7 +3672,10 @@ BytecodeEmitter::reportStrictModeError(ParseNode* pn, unsigned errorNumber, ...)
 
     va_list args;
     va_start(args, errorNumber);
-    bool result = parser.reportStrictModeErrorNumberVA(nullptr, pos.begin, sc->strict(),
+    // FIXME: parser.tokenStream() should be a TokenStreamAnyChars for bug 1351107,
+    // but caused problems, cf. bug 1363116.
+    bool result = parser.tokenStream()
+                        .reportStrictModeErrorNumberVA(nullptr, pos.begin, sc->strict(),
                                                        errorNumber, args);
     va_end(args);
     return result;
@@ -4987,6 +4991,9 @@ BytecodeEmitter::emitScript(ParseNode* body)
             return false;
     }
 
+    if (!updateSourceCoordNotes(body->pn_pos.end))
+        return false;
+
     if (!emit1(JSOP_RETRVAL))
         return false;
 
@@ -5422,7 +5429,14 @@ BytecodeEmitter::emitIteratorClose(IteratorKind iterKind /* = IteratorKind::Sync
     checkTypeSet(JSOP_CALL);
 
     if (iterKind == IteratorKind::Async) {
-        if (!emitAwait())                                 // ... ... RESULT
+        if (completionKind != CompletionKind::Throw) {
+            // Await clobbers rval, so save the current rval.
+            if (!emit1(JSOP_GETRVAL))                     // ... ... RESULT RVAL
+                return false;
+            if (!emit1(JSOP_SWAP))                        // ... ... RVAL RESULT
+                return false;
+        }
+        if (!emitAwait())                                 // ... ... RVAL? RESULT
             return false;
     }
 
@@ -5450,8 +5464,15 @@ BytecodeEmitter::emitIteratorClose(IteratorKind iterKind /* = IteratorKind::Sync
         if (!emitPopN(2))                                 // ... RESULT
             return false;
     } else {
-        if (!emitCheckIsObj(CheckIsObjectKind::IteratorReturn)) // ... RESULT
+        if (!emitCheckIsObj(CheckIsObjectKind::IteratorReturn)) // ... RVAL? RESULT
             return false;
+
+        if (iterKind == IteratorKind::Async) {
+            if (!emit1(JSOP_SWAP))                        // ... RESULT RVAL
+                return false;
+            if (!emit1(JSOP_SETRVAL))                     // ... RESULT
+                return false;
+        }
     }
 
     if (!ifReturnMethodIsDefined.emitElse())
@@ -5469,6 +5490,14 @@ bool
 BytecodeEmitter::wrapWithDestructuringIteratorCloseTryNote(int32_t iterDepth, InnerEmitter emitter)
 {
     MOZ_ASSERT(this->stackDepth >= iterDepth);
+
+    // Pad a nop at the beginning of the bytecode covered by the trynote so
+    // that when unwinding environments, we may unwind to the scope
+    // corresponding to the pc *before* the start, in case the first bytecode
+    // emitted by |emitter| is the start of an inner scope. See comment above
+    // UnwindEnvironmentToTryPc.
+    if (!emit1(JSOP_TRY_DESTRUCTURING_ITERCLOSE))
+        return false;
 
     ptrdiff_t start = offset();
     if (!emitter(this))
@@ -5886,7 +5915,7 @@ BytecodeEmitter::emitDestructuringOpsObject(ParseNode* pattern, DestructuringFla
 
     MOZ_ASSERT(this->stackDepth > 0);                             // ... RHS
 
-    if (!emitRequireObjectCoercible())                            // ... RHS
+    if (!emit1(JSOP_CHECKOBJCOERCIBLE))                           // ... RHS
         return false;
 
     bool needsRestPropertyExcludedSet = pattern->pn_count > 1 &&
@@ -6202,6 +6231,7 @@ BytecodeEmitter::emitSingleDeclaration(ParseNode* declList, ParseNode* decl,
             MOZ_ASSERT(declList->isKind(PNK_LET),
                        "var declarations without initializers handled above, "
                        "and const declarations must have initializers");
+            Unused << declList; // silence clang -Wunused-lambda-capture in opt builds
             return bce->emit1(JSOP_UNDEFINED);
         }
 
@@ -6922,42 +6952,6 @@ BytecodeEmitter::emitWith(ParseNode* pn)
 }
 
 bool
-BytecodeEmitter::emitRequireObjectCoercible()
-{
-    // For simplicity, handle this in self-hosted code, at cost of 13 bytes of
-    // bytecode versus 1 byte for a dedicated opcode.  As more places need this
-    // behavior, we may want to reconsider this tradeoff.
-
-#ifdef DEBUG
-    auto depth = this->stackDepth;
-#endif
-    MOZ_ASSERT(depth > 0);                 // VAL
-    if (!emit1(JSOP_DUP))                  // VAL VAL
-        return false;
-
-    // Note that "intrinsic" is a misnomer: we're calling a *self-hosted*
-    // function that's not an intrinsic!  But it nonetheless works as desired.
-    if (!emitAtomOp(cx->names().RequireObjectCoercible,
-                    JSOP_GETINTRINSIC))    // VAL VAL REQUIREOBJECTCOERCIBLE
-    {
-        return false;
-    }
-    if (!emit1(JSOP_UNDEFINED))            // VAL VAL REQUIREOBJECTCOERCIBLE UNDEFINED
-        return false;
-    if (!emit2(JSOP_PICK, 2))              // VAL REQUIREOBJECTCOERCIBLE UNDEFINED VAL
-        return false;
-    if (!emitCall(JSOP_CALL_IGNORES_RV, 1))// VAL IGNORED
-        return false;
-    checkTypeSet(JSOP_CALL_IGNORES_RV);
-
-    if (!emit1(JSOP_POP))                  // VAL
-        return false;
-
-    MOZ_ASSERT(depth == this->stackDepth);
-    return true;
-}
-
-bool
 BytecodeEmitter::emitCopyDataProperties(CopyOption option)
 {
     DebugOnly<int32_t> depth = this->stackDepth;
@@ -7253,8 +7247,10 @@ BytecodeEmitter::emitForOf(ParseNode* forOfLoop, EmitterScope* headLexicalEmitte
         allowSelfHostedIter = true;
     }
 
-    // Evaluate the expression being iterated.
-    if (!emitTree(forHeadExpr))                           // ITERABLE
+    // Evaluate the expression being iterated. The forHeadExpr should use a
+    // distinct TDZCheckCache to evaluate since (abstractly) it runs in its own
+    // LexicalEnvironment.
+    if (!emitTreeInBranch(forHeadExpr))                   // ITERABLE
         return false;
     if (iterKind == IteratorKind::Async) {
         if (!emitAsyncIterator())                         // ITER
@@ -7453,7 +7449,7 @@ BytecodeEmitter::emitForIn(ParseNode* forInLoop, EmitterScope* headLexicalEmitte
 
     // Evaluate the expression being iterated.
     ParseNode* expr = forInHead->pn_kid3;
-    if (!emitTree(expr))                                  // EXPR
+    if (!emitTreeInBranch(expr))                          // EXPR
         return false;
 
     // Convert the value to the appropriate sort of iterator object for the
@@ -8264,7 +8260,7 @@ BytecodeEmitter::emitFunction(ParseNode* pn, bool needsProto)
     if (topLevelFunction) {
         if (sc->isModuleContext()) {
             // For modules, we record the function and instantiate the binding
-            // during ModuleDeclarationInstantiation(), before the script is run.
+            // during ModuleInstantiate(), before the script is run.
 
             RootedModuleObject module(cx, sc->asModuleContext()->module());
             if (!module->noteFunctionDeclaration(cx, name, fun))
@@ -8619,6 +8615,13 @@ BytecodeEmitter::emitReturn(ParseNode* pn)
     if (ParseNode* pn2 = pn->pn_kid) {
         if (!emitTree(pn2))
             return false;
+
+        bool isAsyncGenerator = sc->asFunctionBox()->isAsync() &&
+                                sc->asFunctionBox()->isStarGenerator();
+        if (isAsyncGenerator) {
+            if (!emitAwait())
+                return false;
+        }
     } else {
         /* No explicit return value provided */
         if (!emit1(JSOP_UNDEFINED))
@@ -8731,6 +8734,14 @@ BytecodeEmitter::emitYield(ParseNode* pn)
         if (!emit1(JSOP_UNDEFINED))
             return false;
     }
+
+    // 11.4.3.7 AsyncGeneratorYield step 5.
+    bool isAsyncGenerator = sc->asFunctionBox()->isAsync();
+    if (isAsyncGenerator) {
+        if (!emitAwait())                                 // RESULT
+            return false;
+    }
+
     if (needsIteratorResult) {
         if (!emitFinishIteratorResult(false))
             return false;
@@ -8802,6 +8813,12 @@ BytecodeEmitter::emitYieldStar(ParseNode* iter)
         return false;
 
     MOZ_ASSERT(this->stackDepth == startDepth);
+
+    // 11.4.3.7 AsyncGeneratorYield step 5.
+    if (isAsyncGenerator) {
+        if (!emitAwait())                                 // ITER RESULT
+            return false;
+    }
 
     // Load the generator object.
     if (!emitGetDotGenerator())                           // ITER RESULT GENOBJ
@@ -8952,11 +8969,6 @@ BytecodeEmitter::emitYieldStar(ParseNode* iter)
     if (!emitAtomOp(cx->names().value, JSOP_GETPROP))     // ITER OLDRESULT FTYPE FVALUE VALUE
         return false;
 
-    if (isAsyncGenerator) {
-        if (!emitAwait())                                 // ITER OLDRESULT FTYPE FVALUE VALUE
-            return false;
-    }
-
     if (!emitPrepareIteratorResult())                     // ITER OLDRESULT FTYPE FVALUE VALUE RESULT
         return false;
     if (!emit1(JSOP_SWAP))                                // ITER OLDRESULT FTYPE FVALUE RESULT VALUE
@@ -9046,11 +9058,6 @@ BytecodeEmitter::emitYieldStar(ParseNode* iter)
         return false;
     if (!emitAtomOp(cx->names().value, JSOP_GETPROP))            // VALUE
         return false;
-
-    if (isAsyncGenerator) {
-        if (!emitAwait())                                        // VALUE
-            return false;
-    }
 
     MOZ_ASSERT(this->stackDepth == startDepth - 1);
 
@@ -9148,8 +9155,6 @@ BytecodeEmitter::emitStatement(ParseNode* pn)
                     return false;
             }
         } else {
-            current->currentLine = parser.tokenStream().srcCoords.lineNum(pn2->pn_pos.begin);
-            current->lastColumn = 0;
             if (!reportExtraWarning(pn2, JSMSG_USELESS_EXPR))
                 return false;
         }
@@ -10681,33 +10686,110 @@ BytecodeEmitter::emitClass(ParseNode* pn)
             return false;
     }
 
+    // Pseudocode for class declarations:
+    //
+    //     class extends BaseExpression {
+    //       constructor() { ... }
+    //       ...
+    //       }
+    //
+    //
+    //   if defined <BaseExpression> {
+    //     let heritage = BaseExpression;
+    //
+    //     if (heritage !== null) {
+    //       funProto = heritage;
+    //       objProto = heritage.prototype;
+    //     } else {
+    //       funProto = %FunctionPrototype%;
+    //       objProto = null;
+    //     }
+    //   } else {
+    //     objProto = %ObjectPrototype%;
+    //   }
+    //
+    //   let homeObject = ObjectCreate(objProto);
+    //
+    //   if defined <constructor> {
+    //     if defined <BaseExpression> {
+    //       cons = DefineMethod(<constructor>, proto=homeObject, funProto=funProto);
+    //     } else {
+    //       cons = DefineMethod(<constructor>, proto=homeObject);
+    //     }
+    //   } else {
+    //     if defined <BaseExpression> {
+    //       cons = DefaultDerivedConstructor(proto=homeObject, funProto=funProto);
+    //     } else {
+    //       cons = DefaultConstructor(proto=homeObject);
+    //     }
+    //   }
+    //
+    //   cons.prototype = homeObject;
+    //   homeObject.constructor = cons;
+    //
+    //   EmitPropertyList(...)
+
     // This is kind of silly. In order to the get the home object defined on
     // the constructor, we have to make it second, but we want the prototype
     // on top for EmitPropertyList, because we expect static properties to be
     // rarer. The result is a few more swaps than we would like. Such is life.
     if (heritageExpression) {
-        if (!emitTree(heritageExpression))
-            return false;
-        if (!emit1(JSOP_CLASSHERITAGE))
-            return false;
-        if (!emit1(JSOP_OBJWITHPROTO))
+        IfThenElseEmitter ifThenElse(this);
+
+        if (!emitTree(heritageExpression))                      // ... HERITAGE
             return false;
 
-        // JSOP_CLASSHERITAGE leaves both protos on the stack. After
-        // creating the prototype, swap it to the bottom to make the
-        // constructor.
-        if (!emit1(JSOP_SWAP))
+        // Heritage must be null or a non-generator constructor
+        if (!emit1(JSOP_CHECKCLASSHERITAGE))                    // ... HERITAGE
+            return false;
+
+        // [IF] (heritage !== null)
+        if (!emit1(JSOP_DUP))                                   // ... HERITAGE HERITAGE
+            return false;
+        if (!emit1(JSOP_NULL))                                  // ... HERITAGE HERITAGE NULL
+            return false;
+        if (!emit1(JSOP_STRICTNE))                              // ... HERITAGE NE
+            return false;
+
+        // [THEN] funProto = heritage, objProto = heritage.prototype
+        if (!ifThenElse.emitIfElse())
+            return false;
+        if (!emit1(JSOP_DUP))                                   // ... HERITAGE HERITAGE
+            return false;
+        if (!emitAtomOp(cx->names().prototype, JSOP_GETPROP))   // ... HERITAGE PROTO
+            return false;
+
+        // [ELSE] funProto = %FunctionPrototype%, objProto = null
+        if (!ifThenElse.emitElse())
+            return false;
+        if (!emit1(JSOP_POP))                                   // ...
+            return false;
+        if (!emit2(JSOP_BUILTINPROTO, JSProto_Function))        // ... PROTO
+            return false;
+        if (!emit1(JSOP_NULL))                                  // ... PROTO NULL
+            return false;
+
+        // [ENDIF]
+        if (!ifThenElse.emitEnd())
+            return false;
+
+        if (!emit1(JSOP_OBJWITHPROTO))                          // ... HERITAGE HOMEOBJ
+            return false;
+        if (!emit1(JSOP_SWAP))                                  // ... HOMEOBJ HERITAGE
             return false;
     } else {
-        if (!emitNewInit(JSProto_Object))
+        if (!emitNewInit(JSProto_Object))                       // ... HOMEOBJ
             return false;
     }
 
+    // Stack currently has HOMEOBJ followed by optional HERITAGE. When HERITAGE
+    // is not used, an implicit value of %FunctionPrototype% is implied.
+
     if (constructor) {
-        if (!emitFunction(constructor, !!heritageExpression))
+        if (!emitFunction(constructor, !!heritageExpression))   // ... HOMEOBJ CONSTRUCTOR
             return false;
         if (constructor->pn_funbox->needsHomeObject()) {
-            if (!emit2(JSOP_INITHOMEOBJECT, 0))
+            if (!emit2(JSOP_INITHOMEOBJECT, 0))                 // ... HOMEOBJ CONSTRUCTOR
                 return false;
         }
     } else {
@@ -10715,39 +10797,41 @@ BytecodeEmitter::emitClass(ParseNode* pn)
         // offsets in the source buffer as source notes so that when we
         // actually make the constructor during execution, we can give it the
         // correct toString output.
-        if (!newSrcNote3(SRC_CLASS_SPAN, ptrdiff_t(pn->pn_pos.begin), ptrdiff_t(pn->pn_pos.end)))
+        ptrdiff_t classStart = ptrdiff_t(pn->pn_pos.begin);
+        ptrdiff_t classEnd = ptrdiff_t(pn->pn_pos.end);
+        if (!newSrcNote3(SRC_CLASS_SPAN, classStart, classEnd))
             return false;
 
         JSAtom *name = names ? names->innerBinding()->pn_atom : cx->names().empty;
         if (heritageExpression) {
-            if (!emitAtomOp(name, JSOP_DERIVEDCONSTRUCTOR))
+            if (!emitAtomOp(name, JSOP_DERIVEDCONSTRUCTOR))     // ... HOMEOBJ CONSTRUCTOR
                 return false;
         } else {
-            if (!emitAtomOp(name, JSOP_CLASSCONSTRUCTOR))
+            if (!emitAtomOp(name, JSOP_CLASSCONSTRUCTOR))       // ... HOMEOBJ CONSTRUCTOR
                 return false;
         }
     }
 
-    if (!emit1(JSOP_SWAP))
+    if (!emit1(JSOP_SWAP))                                      // ... CONSTRUCTOR HOMEOBJ
         return false;
 
-    if (!emit1(JSOP_DUP2))
+    if (!emit1(JSOP_DUP2))                                          // ... CONSTRUCTOR HOMEOBJ CONSTRUCTOR HOMEOBJ
         return false;
-    if (!emitAtomOp(cx->names().prototype, JSOP_INITLOCKEDPROP))
+    if (!emitAtomOp(cx->names().prototype, JSOP_INITLOCKEDPROP))    // ... CONSTRUCTOR HOMEOBJ CONSTRUCTOR
         return false;
-    if (!emitAtomOp(cx->names().constructor, JSOP_INITHIDDENPROP))
+    if (!emitAtomOp(cx->names().constructor, JSOP_INITHIDDENPROP))  // ... CONSTRUCTOR HOMEOBJ
         return false;
 
     RootedPlainObject obj(cx);
-    if (!emitPropertyList(classMethods, &obj, ClassBody))
+    if (!emitPropertyList(classMethods, &obj, ClassBody))       // ... CONSTRUCTOR HOMEOBJ
         return false;
 
-    if (!emit1(JSOP_POP))
+    if (!emit1(JSOP_POP))                                       // ... CONSTRUCTOR
         return false;
 
     if (names) {
         ParseNode* innerName = names->innerBinding();
-        if (!emitLexicalInitialization(innerName))
+        if (!emitLexicalInitialization(innerName))              // ... CONSTRUCTOR
             return false;
 
         // Pop the inner scope.
@@ -10757,14 +10841,16 @@ BytecodeEmitter::emitClass(ParseNode* pn)
 
         ParseNode* outerName = names->outerBinding();
         if (outerName) {
-            if (!emitLexicalInitialization(outerName))
+            if (!emitLexicalInitialization(outerName))          // ... CONSTRUCTOR
                 return false;
             // Only class statements make outer bindings, and they do not leave
             // themselves on the stack.
-            if (!emit1(JSOP_POP))
+            if (!emit1(JSOP_POP))                               // ...
                 return false;
         }
     }
+
+    // The CONSTRUCTOR is left on stack if this is an expression.
 
     MOZ_ALWAYS_TRUE(sc->setLocalStrictMode(savedStrictness));
 
@@ -11210,11 +11296,6 @@ BytecodeEmitter::emitTreeInBranch(ParseNode* pn,
 static bool
 AllocSrcNote(JSContext* cx, SrcNotesVector& notes, unsigned* index)
 {
-    // Start it off moderately large to avoid repeated resizings early on.
-    // ~99% of cases fit within 256 bytes.
-    if (notes.capacity() == 0 && !notes.reserve(256))
-        return false;
-
     if (!notes.growBy(1)) {
         ReportOutOfMemory(cx);
         return false;

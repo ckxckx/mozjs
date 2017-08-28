@@ -79,7 +79,7 @@ class MarkStack
 
     static const uintptr_t TagMask = 7;
     static_assert(TagMask >= uintptr_t(LastTag), "The tag mask must subsume the tags.");
-    static_assert(TagMask <= gc::CellMask, "The tag mask must be embeddable in a Cell*.");
+    static_assert(TagMask <= gc::CellAlignMask, "The tag mask must be embeddable in a Cell*.");
 
     class TaggedPtr
     {
@@ -114,8 +114,10 @@ class MarkStack
         TaggedPtr ptr;
     };
 
-    explicit MarkStack(size_t maxCapacity);
+    explicit MarkStack(size_t maxCapacity = DefaultCapacity);
     ~MarkStack();
+
+    static const size_t DefaultCapacity = SIZE_MAX;
 
     size_t capacity() { return end_ - stack_; }
 
@@ -265,15 +267,15 @@ class GCMarker : public JSTracer
      */
     void setMarkColorGray() {
         MOZ_ASSERT(isDrained());
-        MOZ_ASSERT(color == gc::BLACK);
-        color = gc::GRAY;
+        MOZ_ASSERT(color == gc::MarkColor::Black);
+        color = gc::MarkColor::Gray;
     }
     void setMarkColorBlack() {
         MOZ_ASSERT(isDrained());
-        MOZ_ASSERT(color == gc::GRAY);
-        color = gc::BLACK;
+        MOZ_ASSERT(color == gc::MarkColor::Gray);
+        color = gc::MarkColor::Black;
     }
-    uint32_t markColor() const { return color; }
+    gc::MarkColor markColor() const { return color; }
 
     void enterWeakMarkingMode();
     void leaveWeakMarkingMode();
@@ -366,7 +368,7 @@ class GCMarker : public JSTracer
     gc::MarkStack stack;
 
     /* The color is only applied to objects and functions. */
-    ActiveThreadData<uint32_t> color;
+    ActiveThreadData<gc::MarkColor> color;
 
     /* Pointer to the top of the stack of arenas we are delaying marking on. */
     ActiveThreadData<js::gc::Arena*> unmarkedArenaStackTop;
@@ -397,6 +399,9 @@ class GCMarker : public JSTracer
 // the marking phase of incremental GC.
 bool
 IsBufferGrayRootsTracer(JSTracer* trc);
+
+bool
+IsUnmarkGrayTracer(JSTracer* trc);
 #endif
 
 namespace gc {
@@ -501,5 +506,18 @@ void
 CheckTracedThing(JSTracer* trc, T thing);
 
 } /* namespace js */
+
+namespace JS {
+class Symbol;
+}
+
+// Exported for Tracer.cpp
+inline bool ThingIsPermanentAtomOrWellKnownSymbol(js::gc::Cell* thing) { return false; }
+bool ThingIsPermanentAtomOrWellKnownSymbol(JSString*);
+bool ThingIsPermanentAtomOrWellKnownSymbol(JSFlatString*);
+bool ThingIsPermanentAtomOrWellKnownSymbol(JSLinearString*);
+bool ThingIsPermanentAtomOrWellKnownSymbol(JSAtom*);
+bool ThingIsPermanentAtomOrWellKnownSymbol(js::PropertyName*);
+bool ThingIsPermanentAtomOrWellKnownSymbol(JS::Symbol*);
 
 #endif /* gc_Marking_h */

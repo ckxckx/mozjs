@@ -37,8 +37,7 @@ struct ProxyTraps {
     bool (*delete_)(JSContext *cx, JS::HandleObject proxy,
                     JS::HandleId id, JS::ObjectOpResult &result);
 
-    bool (*enumerate)(JSContext *cx, JS::HandleObject proxy,
-                      JS::MutableHandleObject objp);
+    JSObject* (*enumerate)(JSContext *cx, JS::HandleObject proxy);
 
     bool (*getPrototypeIfOrdinary)(JSContext *cx, JS::HandleObject proxy,
                                    bool *isOrdinary, JS::MutableHandleObject protop);
@@ -78,8 +77,8 @@ struct ProxyTraps {
     bool (*objectClassIs)(JS::HandleObject obj, js::ESClass classValue,
                           JSContext *cx);
     const char *(*className)(JSContext *cx, JS::HandleObject proxy);
-    JSString *(*fun_toString)(JSContext *cx, JS::HandleObject proxy,
-                              unsigned indent);
+    JSString* (*fun_toString)(JSContext *cx, JS::HandleObject proxy,
+                              bool isToString);
     //bool (*regexp_toShared)(JSContext *cx, JS::HandleObject proxy, RegExpGuard *g);
     bool (*boxedValue_unbox)(JSContext *cx, JS::HandleObject proxy,
                              JS::MutableHandleValue vp);
@@ -104,12 +103,12 @@ static int HandlerFamily;
 #define DEFER_TO_TRAP_OR_BASE_CLASS(_base)                                      \
                                                                                 \
     /* Standard internal methods. */                                            \
-    virtual bool enumerate(JSContext *cx, JS::HandleObject proxy,               \
-                           JS::MutableHandleObject objp) const override         \
+    virtual JSObject* enumerate(JSContext *cx,                                  \
+                                JS::HandleObject proxy) const override          \
     {                                                                           \
         return mTraps.enumerate                                                 \
-               ? mTraps.enumerate(cx, proxy, objp)                              \
-               : _base::enumerate(cx, proxy, objp);                             \
+               ? mTraps.enumerate(cx, proxy)                                    \
+               : _base::enumerate(cx, proxy);                                   \
     }                                                                           \
                                                                                 \
     virtual bool has(JSContext* cx, JS::HandleObject proxy,                     \
@@ -121,7 +120,7 @@ static int HandlerFamily;
     }                                                                           \
                                                                                 \
     virtual bool get(JSContext* cx, JS::HandleObject proxy,                     \
-                     JS::HandleValue receiver,                                 \
+                     JS::HandleValue receiver,                                  \
                      JS::HandleId id, JS::MutableHandleValue vp) const override \
     {                                                                           \
         return mTraps.get                                                       \
@@ -198,11 +197,11 @@ static int HandlerFamily;
     }                                                                           \
                                                                                 \
     virtual JSString* fun_toString(JSContext* cx, JS::HandleObject proxy,       \
-                                   unsigned indent) const override              \
+                                   bool isToString) const override              \
     {                                                                           \
         return mTraps.fun_toString                                              \
-               ? mTraps.fun_toString(cx, proxy, indent)                         \
-               : _base::fun_toString(cx, proxy, indent);                        \
+               ? mTraps.fun_toString(cx, proxy, isToString)                     \
+               : _base::fun_toString(cx, proxy, isToString);                    \
     }                                                                           \
                                                                                 \
     virtual bool boxedValue_unbox(JSContext* cx, JS::HandleObject proxy,        \

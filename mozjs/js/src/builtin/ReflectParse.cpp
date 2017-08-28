@@ -3272,7 +3272,7 @@ ASTSerializer::literal(ParseNode* pn, MutableHandleValue dst)
         RootedObject re1(cx, pn->as<RegExpLiteral>().objbox()->object);
         LOCAL_ASSERT(re1 && re1->is<RegExpObject>());
 
-        RootedObject re2(cx, CloneRegExpObject(cx, re1));
+        RootedObject re2(cx, CloneRegExpObject(cx, re1.as<RegExpObject>()));
         if (!re2)
             return false;
 
@@ -3741,7 +3741,10 @@ reflect_parse(JSContext* cx, uint32_t argc, Value* vp)
         if (!module)
             return false;
 
-        ModuleBuilder builder(cx, module);
+        ModuleBuilder builder(cx, module, parser.tokenStream);
+        if (!builder.init())
+            return false;
+
         ModuleSharedContext modulesc(cx, module, &cx->global()->emptyGlobalScope(), builder);
         pn = parser.moduleBody(&modulesc);
         if (!pn)

@@ -124,7 +124,8 @@ NativeObject::elementsRangeWriteBarrierPost(uint32_t start, uint32_t count)
         const Value& v = elements_[start + i];
         if (v.isObject() && IsInsideNursery(&v.toObject())) {
             zone()->group()->storeBuffer().putSlot(this, HeapSlot::Element,
-                                                   start + i, count - i);
+                                                   unshiftedIndex(start + i),
+                                                   count - i);
             return;
         }
     }
@@ -141,8 +142,12 @@ NativeObject::copyDenseElements(uint32_t dstStart, const Value* src, uint32_t co
         checkStoredValue(src[i]);
 #endif
     if (JS::shadow::Zone::asShadowZone(zone())->needsIncrementalBarrier()) {
-        for (uint32_t i = 0; i < count; ++i)
-            elements_[dstStart + i].set(this, HeapSlot::Element, dstStart + i, src[i]);
+        uint32_t numShifted = getElementsHeader()->numShiftedElements();
+        for (uint32_t i = 0; i < count; ++i) {
+            elements_[dstStart + i].set(this, HeapSlot::Element,
+                                        dstStart + i + numShifted,
+                                        src[i]);
+        }
     } else {
         memcpy(&elements_[dstStart], src, count * sizeof(HeapSlot));
         elementsRangeWriteBarrierPost(dstStart, count);
@@ -161,6 +166,43 @@ NativeObject::initDenseElements(uint32_t dstStart, const Value* src, uint32_t co
 #endif
     memcpy(&elements_[dstStart], src, count * sizeof(HeapSlot));
     elementsRangeWriteBarrierPost(dstStart, count);
+}
+
+inline bool
+NativeObject::tryShiftDenseElements(uint32_t count)
+{
+    ObjectElements* header = getElementsHeader();
+    if (header->initializedLength == count ||
+        count > ObjectElements::MaxShiftedElements ||
+        header->isCopyOnWrite() ||
+        header->isFrozen() ||
+        header->hasNonwritableArrayLength())
+    {
+        return false;
+    }
+
+    shiftDenseElementsUnchecked(count);
+    return true;
+}
+
+inline void
+NativeObject::shiftDenseElementsUnchecked(uint32_t count)
+{
+    ObjectElements* header = getElementsHeader();
+    MOZ_ASSERT(count > 0);
+    MOZ_ASSERT(count < header->initializedLength);
+
+    if (MOZ_UNLIKELY(header->numShiftedElements() + count > ObjectElements::MaxShiftedElements)) {
+        moveShiftedElements();
+        header = getElementsHeader();
+    }
+
+    prepareElementRangeForOverwrite(0, count);
+    header->addShiftedElements(count);
+
+    elements_ += count;
+    ObjectElements* newHeader = getElementsHeader();
+    memmove(newHeader, header, sizeof(ObjectElements));
 }
 
 inline void
@@ -184,16 +226,17 @@ NativeObject::moveDenseElements(uint32_t dstStart, uint32_t srcStart, uint32_t c
      * the array before and after the move.
      */
     if (JS::shadow::Zone::asShadowZone(zone())->needsIncrementalBarrier()) {
+        uint32_t numShifted = getElementsHeader()->numShiftedElements();
         if (dstStart < srcStart) {
             HeapSlot* dst = elements_ + dstStart;
             HeapSlot* src = elements_ + srcStart;
             for (uint32_t i = 0; i < count; i++, dst++, src++)
-                dst->set(this, HeapSlot::Element, dst - elements_, *src);
+                dst->set(this, HeapSlot::Element, dst - elements_ + numShifted, *src);
         } else {
             HeapSlot* dst = elements_ + dstStart + count - 1;
             HeapSlot* src = elements_ + srcStart + count - 1;
             for (uint32_t i = 0; i < count; i++, dst--, src--)
-                dst->set(this, HeapSlot::Element, dst - elements_, *src);
+                dst->set(this, HeapSlot::Element, dst - elements_ + numShifted, *src);
         }
     } else {
         memmove(elements_ + dstStart, elements_ + srcStart, count * sizeof(HeapSlot));
@@ -231,12 +274,13 @@ NativeObject::ensureDenseInitializedLengthNoPackedCheck(JSContext* cx, uint32_t 
     uint32_t& initlen = getElementsHeader()->initializedLength;
 
     if (initlen < index + extra) {
+        uint32_t numShifted = getElementsHeader()->numShiftedElements();
         size_t offset = initlen;
         for (HeapSlot* sp = elements_ + initlen;
              sp != elements_ + (index + extra);
              sp++, offset++)
         {
-            sp->init(this, HeapSlot::Element, offset, MagicValue(JS_ELEMENTS_HOLE));
+            sp->init(this, HeapSlot::Element, offset + numShifted, MagicValue(JS_ELEMENTS_HOLE));
         }
         initlen = index + extra;
     }
@@ -376,7 +420,7 @@ NativeObject::copy(JSContext* cx, gc::AllocKind kind, gc::InitialHeap heap,
     return obj;
 }
 
-inline void
+MOZ_ALWAYS_INLINE void
 NativeObject::setSlotWithType(JSContext* cx, Shape* shape,
                               const Value& value, bool overwriting)
 {
@@ -454,6 +498,36 @@ NativeObject::create(JSContext* cx, js::gc::AllocKind kind, js::gc::InitialHeap 
     js::gc::TraceCreateObject(nobj);
 
     return nobj;
+}
+
+MOZ_ALWAYS_INLINE uint32_t
+NativeObject::numDynamicSlots() const
+{
+    return dynamicSlotsCount(numFixedSlots(), slotSpan(), getClass());
+}
+
+/* static */ MOZ_ALWAYS_INLINE uint32_t
+NativeObject::dynamicSlotsCount(uint32_t nfixed, uint32_t span, const Class* clasp)
+{
+    if (span <= nfixed)
+        return 0;
+    span -= nfixed;
+
+    // Increase the slots to SLOT_CAPACITY_MIN to decrease the likelihood
+    // the dynamic slots need to get increased again. ArrayObjects ignore
+    // this because slots are uncommon in that case.
+    if (clasp != &ArrayObject::class_ && span <= SLOT_CAPACITY_MIN)
+        return SLOT_CAPACITY_MIN;
+
+    uint32_t slots = mozilla::RoundUpPow2(span);
+    MOZ_ASSERT(slots >= span);
+    return slots;
+}
+
+/* static */ MOZ_ALWAYS_INLINE uint32_t
+NativeObject::dynamicSlotsCount(Shape* shape)
+{
+    return dynamicSlotsCount(shape->numFixedSlots(), shape->slotSpan(), shape->getObjectClass());
 }
 
 MOZ_ALWAYS_INLINE bool
@@ -635,28 +709,6 @@ CallResolveOp(JSContext* cx, HandleNativeObject obj, HandleId id,
     return true;
 }
 
-static MOZ_ALWAYS_INLINE bool
-ClassMayResolveId(const JSAtomState& names, const Class* clasp, jsid id, JSObject* maybeObj)
-{
-    MOZ_ASSERT_IF(maybeObj, maybeObj->getClass() == clasp);
-
-    if (!clasp->getResolve()) {
-        // Sanity check: we should only have a mayResolve hook if we have a
-        // resolve hook.
-        MOZ_ASSERT(!clasp->getMayResolve(), "Class with mayResolve hook but no resolve hook");
-        return false;
-    }
-
-    if (JSMayResolveOp mayResolve = clasp->getMayResolve()) {
-        // Tell the analysis our mayResolve hooks won't trigger GC.
-        JS::AutoSuppressGCAnalysis nogc;
-        if (!mayResolve(names, id, maybeObj))
-            return false;
-    }
-
-    return true;
-}
-
 template <AllowGC allowGC>
 static MOZ_ALWAYS_INLINE bool
 LookupOwnPropertyInline(JSContext* cx,
@@ -687,8 +739,9 @@ LookupOwnPropertyInline(JSContext* cx,
         }
     }
 
-    // Check for a native property.
-    if (Shape* shape = obj->lookup(cx, id)) {
+    // Check for a native property. Call Shape::search directly (instead of
+    // NativeObject::lookup) because it's inlined.
+    if (Shape* shape = obj->lastProperty()->search(cx, id)) {
         propp.setNativeProperty(shape);
         *donep = true;
         return true;

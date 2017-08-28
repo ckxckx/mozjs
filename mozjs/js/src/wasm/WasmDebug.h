@@ -33,9 +33,10 @@ class WasmInstanceObject;
 
 namespace wasm {
 
-struct LinkData;
-struct Metadata;
+struct LinkDataTier;
+struct MetadataTier;
 class FrameIterator;
+class LinkData;
 
 // The generated source location for the AST node/expression. The offset field refers
 // an offset in an binary format file.
@@ -84,6 +85,7 @@ class DebugState
     const SharedCode         code_;
     const SharedBytes        maybeBytecode_;
     UniqueGeneratedSourceMap maybeSourceMap_;
+    bool                     binarySource_;
 
     // State maintained when debugging is enabled. In this case, the Code is
     // not actually shared, but is referenced uniquely by the instance that is
@@ -98,7 +100,11 @@ class DebugState
 
   public:
     DebugState(SharedCode code,
-               const ShareableBytes* maybeBytecode);
+               const ShareableBytes* maybeBytecode,
+               bool binarySource);
+
+    const Bytes* maybeBytecode() const { return maybeBytecode_ ? &maybeBytecode_->bytes : nullptr; }
+    bool binarySource() const { return binarySource_; }
 
     // If the source bytecode was saved when this Code was constructed, this
     // method will render the binary as text. Otherwise, a diagnostic string
@@ -106,6 +112,7 @@ class DebugState
 
     JSString* createText(JSContext* cx);
     bool getLineOffsets(JSContext* cx, size_t lineno, Vector<uint32_t>* offsets);
+    bool getAllColumnOffsets(JSContext* cx, Vector<ExprLoc>* offsets);
     bool getOffsetLocation(JSContext* cx, uint32_t offset, bool* found, size_t* lineno, size_t* column);
     bool totalSourceLines(JSContext* cx, uint32_t* count);
 
@@ -130,26 +137,29 @@ class DebugState
 
     bool stepModeEnabled(uint32_t funcIndex) const;
     bool incrementStepModeCount(JSContext* cx, uint32_t funcIndex);
-    bool decrementStepModeCount(JSContext* cx, uint32_t funcIndex);
+    bool decrementStepModeCount(FreeOp* fop, uint32_t funcIndex);
 
     // Stack inspection helpers.
 
     bool debugGetLocalTypes(uint32_t funcIndex, ValTypeVector* locals, size_t* argsLength);
     ExprType debugGetResultType(uint32_t funcIndex);
+    bool getGlobal(Instance& instance, uint32_t globalIndex, MutableHandleValue vp);
 
     // Debug URL helpers.
 
     JSString* debugDisplayURL(JSContext* cx) const;
+    bool getSourceMappingURL(JSContext* cx, MutableHandleString result) const;
 
     // Accessors for commonly used elements of linked structures.
 
+    const MetadataTier& metadata(Tier t) const { return code_->metadata(t); }
     const Metadata& metadata() const { return code_->metadata(); }
     bool debugEnabled() const { return metadata().debugEnabled; }
-    const CodeRangeVector& codeRanges() const { return metadata().codeRanges; }
-    const CallSiteVector& callSites() const { return metadata().callSites; }
+    const CodeRangeVector& codeRanges(Tier t) const { return metadata(t).codeRanges; }
+    const CallSiteVector& callSites(Tier t) const { return metadata(t).callSites; }
 
-    uint32_t debugFuncToCodeRange(uint32_t funcIndex) const {
-        return metadata().debugFuncToCodeRange[funcIndex];
+    uint32_t debugFuncToCodeRangeIndex(uint32_t funcIndex) const {
+        return metadata(Tier::Debug).debugFuncToCodeRange[funcIndex];
     }
 
     // about:memory reporting:

@@ -199,7 +199,7 @@ gc::GCRuntime::startVerifyPreBarriers()
     for (auto chunk = allNonEmptyChunks(); !chunk.done(); chunk.next())
         chunk->bitmap.clear();
 
-    gcstats::AutoPhase ap(stats(), gcstats::PHASE_TRACE_HEAP);
+    gcstats::AutoPhase ap(stats(), gcstats::PhaseKind::TRACE_HEAP);
 
     const size_t size = 64 * 1024 * 1024;
     trc->root = (VerifyNode*)js_malloc(size);
@@ -261,7 +261,7 @@ oom:
 static bool
 IsMarkedOrAllocated(TenuredCell* cell)
 {
-    return cell->isMarked() || cell->arena()->allocatedDuringIncremental;
+    return cell->isMarkedAny() || cell->arena()->allocatedDuringIncremental;
 }
 
 struct CheckEdgeTracer : public JS::CallbackTracer {
@@ -590,7 +590,7 @@ CheckHeapTracer::CheckHeapTracer(JSRuntime* rt)
 inline static bool
 IsValidGCThingPointer(Cell* cell)
 {
-    return (uintptr_t(cell) & CellMask) == 0;
+    return (uintptr_t(cell) & CellAlignMask) == 0;
 }
 
 void
@@ -610,7 +610,7 @@ CheckHeapTracer::check(AutoLockForExclusiveAccess& lock)
         return;
 
     if (failures)
-        fprintf(stderr, "Heap check: %" PRIuSIZE " failure(s)\n", failures);
+        fprintf(stderr, "Heap check: %zu failure(s)\n", failures);
     MOZ_RELEASE_ASSERT(failures == 0);
 }
 
@@ -653,8 +653,7 @@ CheckGrayMarkingTracer::checkCell(Cell* cell)
 
     TenuredCell* tenuredCell = &cell->asTenured();
     TenuredCell* tenuredParent = &parent->asTenured();
-    if (tenuredParent->isMarked(BLACK) && !tenuredParent->isMarked(GRAY) &&
-        tenuredCell->isMarked(GRAY))
+    if (tenuredParent->isMarkedBlack() && tenuredCell->isMarkedGray())
     {
         failures++;
         fprintf(stderr, "Found black to gray edge to %s %p\n",
@@ -680,7 +679,7 @@ js::CheckGrayMarkingState(JSRuntime* rt)
     if (!rt->gc.areGrayBitsValid())
         return true;
 
-    gcstats::AutoPhase ap(rt->gc.stats(), gcstats::PHASE_TRACE_HEAP);
+    gcstats::AutoPhase ap(rt->gc.stats(), gcstats::PhaseKind::TRACE_HEAP);
     AutoTraceSession session(rt, JS::HeapState::Tracing);
     CheckGrayMarkingTracer tracer(rt);
     if (!tracer.init())

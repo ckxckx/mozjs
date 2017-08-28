@@ -208,6 +208,20 @@ js::ResumeCooperativeContext(JSContext* cx)
     cx->runtime()->setActiveContext(cx);
 }
 
+static void
+FreeJobQueueHandling(JSContext* cx)
+{
+    if (!cx->jobQueue)
+        return;
+
+    cx->jobQueue->reset();
+    FreeOp* fop = cx->defaultFreeOp();
+    fop->delete_(cx->jobQueue.ref());
+    cx->getIncumbentGlobalCallback = nullptr;
+    cx->enqueuePromiseJobCallback = nullptr;
+    cx->enqueuePromiseJobCallbackData = nullptr;
+}
+
 void
 js::DestroyContext(JSContext* cx)
 {
@@ -224,11 +238,16 @@ js::DestroyContext(JSContext* cx)
     // zone group. See HelperThread::handleIonWorkload.
     CancelOffThreadIonCompile(cx->runtime());
 
+    FreeJobQueueHandling(cx);
+
     if (cx->runtime()->cooperatingContexts().length() == 1) {
+        // Flush promise tasks executing in helper threads early, before any parts
+        // of the JSRuntime that might be visible to helper threads are torn down.
+        cx->runtime()->offThreadPromiseState.ref().shutdown(cx);
+
         // Destroy the runtime along with its last context.
         cx->runtime()->destroyRuntime();
         js_delete(cx->runtime());
-
         js_delete_poison(cx);
     } else {
         DebugOnly<bool> found = false;
@@ -1094,6 +1113,138 @@ JSContext::recoverFromOutOfMemory()
     }
 }
 
+static bool
+InternalEnqueuePromiseJobCallback(JSContext* cx, JS::HandleObject job,
+                                  JS::HandleObject allocationSite,
+                                  JS::HandleObject incumbentGlobal, void* data)
+{
+    MOZ_ASSERT(job);
+    return cx->jobQueue->append(job);
+}
+
+namespace {
+class MOZ_STACK_CLASS ReportExceptionClosure : public ScriptEnvironmentPreparer::Closure
+{
+  public:
+    explicit ReportExceptionClosure(HandleValue exn)
+        : exn_(exn)
+    {
+    }
+
+    bool operator()(JSContext* cx) override
+    {
+        cx->setPendingException(exn_);
+        return false;
+    }
+
+  private:
+    HandleValue exn_;
+};
+} // anonymous namespace
+
+JS_FRIEND_API(bool)
+js::UseInternalJobQueues(JSContext* cx)
+{
+    // Internal job queue handling must be set up very early. Self-hosting
+    // initialization is as good a marker for that as any.
+    MOZ_RELEASE_ASSERT(!cx->runtime()->hasInitializedSelfHosting(),
+                       "js::UseInternalJobQueues must be called early during runtime startup.");
+    MOZ_ASSERT(!cx->jobQueue);
+    auto* queue = cx->new_<PersistentRooted<JobQueue>>(cx, JobQueue(SystemAllocPolicy()));
+    if (!queue)
+        return false;
+
+    cx->jobQueue = queue;
+    cx->runtime()->offThreadPromiseState.ref().initInternalDispatchQueue();
+
+    JS::SetEnqueuePromiseJobCallback(cx, InternalEnqueuePromiseJobCallback);
+
+    return true;
+}
+
+JS_FRIEND_API(void)
+js::StopDrainingJobQueue(JSContext* cx)
+{
+    MOZ_ASSERT(cx->jobQueue);
+    cx->stopDrainingJobQueue = true;
+}
+
+JS_FRIEND_API(void)
+js::RunJobs(JSContext* cx)
+{
+    MOZ_ASSERT(cx->jobQueue);
+
+    if (cx->drainingJobQueue || cx->stopDrainingJobQueue)
+        return;
+
+    while (true) {
+        cx->runtime()->offThreadPromiseState.ref().internalDrain(cx);
+
+        // It doesn't make sense for job queue draining to be reentrant. At the
+        // same time we don't want to assert against it, because that'd make
+        // drainJobQueue unsafe for fuzzers. We do want fuzzers to test this,
+        // so we simply ignore nested calls of drainJobQueue.
+        cx->drainingJobQueue = true;
+
+        RootedObject job(cx);
+        JS::HandleValueArray args(JS::HandleValueArray::empty());
+        RootedValue rval(cx);
+
+        // Execute jobs in a loop until we've reached the end of the queue.
+        // Since executing a job can trigger enqueuing of additional jobs,
+        // it's crucial to re-check the queue length during each iteration.
+        for (size_t i = 0; i < cx->jobQueue->length(); i++) {
+            // A previous job might have set this flag. E.g., the js shell
+            // sets it if the `quit` builtin function is called.
+            if (cx->stopDrainingJobQueue)
+                break;
+
+            job = cx->jobQueue->get()[i];
+
+            // It's possible that queue draining was interrupted prematurely,
+            // leaving the queue partly processed. In that case, slots for
+            // already-executed entries will contain nullptrs, which we should
+            // just skip.
+            if (!job)
+                continue;
+
+            cx->jobQueue->get()[i] = nullptr;
+            AutoCompartment ac(cx, job);
+            {
+                if (!JS::Call(cx, UndefinedHandleValue, job, args, &rval)) {
+                    // Nothing we can do about uncatchable exceptions.
+                    if (!cx->isExceptionPending())
+                        continue;
+                    RootedValue exn(cx);
+                    if (cx->getPendingException(&exn)) {
+                        /*
+                         * Clear the exception, because
+                         * PrepareScriptEnvironmentAndInvoke will assert that we don't
+                         * have one.
+                         */
+                        cx->clearPendingException();
+                        ReportExceptionClosure reportExn(exn);
+                        PrepareScriptEnvironmentAndInvoke(cx, cx->global(), reportExn);
+                    }
+                }
+            }
+        }
+
+        cx->drainingJobQueue = false;
+
+        if (cx->stopDrainingJobQueue) {
+            cx->stopDrainingJobQueue = false;
+            break;
+        }
+
+        cx->jobQueue->clear();
+
+        // It's possible a job added a new off-thread promise task.
+        if (!cx->runtime()->offThreadPromiseState.ref().internalHasPending())
+            break;
+    }
+}
+
 JS::Error JSContext::reportedError;
 JS::OOM JSContext::reportedOOM;
 
@@ -1133,7 +1284,6 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
     jitActivation(nullptr),
     activation_(nullptr),
     profilingActivation_(nullptr),
-    wasmActivationStack_(nullptr),
     nativeStackBase(GetNativeStackBase()),
     entryMonitor(nullptr),
     noExecuteDebuggerTop(nullptr),
@@ -1154,7 +1304,6 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
     dtoaState(nullptr),
     heapState(JS::HeapState::Idle),
     suppressGC(0),
-    allowGCBarriers(true),
 #ifdef DEBUG
     ionCompiling(false),
     ionCompilingSafeForMinorGC(false),
@@ -1181,7 +1330,7 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
     throwing(false),
     overRecursed_(false),
     propagatingForcedReturn_(false),
-    liveVolatileJitFrameIterators_(nullptr),
+    liveVolatileJitFrameIter_(nullptr),
     reportGranularity(JS_DEFAULT_JITREPORT_GRANULARITY),
     resolvingList(nullptr),
 #ifdef DEBUG
@@ -1196,15 +1345,18 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
     asyncCallIsExplicit(false),
     interruptCallbackDisabled(false),
     interrupt_(false),
+    interruptRegExpJit_(false),
     handlingJitInterrupt_(false),
     osrTempData_(nullptr),
     ionReturnOverride_(MagicValue(JS_ARG_POISON)),
-    jitTop(nullptr),
     jitStackLimit(UINTPTR_MAX),
     jitStackLimitNoInterrupt(UINTPTR_MAX),
     getIncumbentGlobalCallback(nullptr),
     enqueuePromiseJobCallback(nullptr),
     enqueuePromiseJobCallbackData(nullptr),
+    jobQueue(nullptr),
+    drainingJobQueue(false),
+    stopDrainingJobQueue(false),
     promiseRejectionTrackerCallback(nullptr),
     promiseRejectionTrackerCallbackData(nullptr)
 {
@@ -1395,6 +1547,7 @@ void
 JSContext::trace(JSTracer* trc)
 {
     cycleDetectorVector().trace(trc);
+    geckoProfiler().trace(trc);
 
     if (trc->isMarkingTracer() && compartment_)
         compartment_->mark();

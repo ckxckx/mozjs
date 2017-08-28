@@ -26,6 +26,8 @@ function checkExternalFunction(entry)
         "ceil",
         /memchr/,
         "strlen",
+        /Servo_DeclarationBlock_GetCssText/,
+        /nsIFrame::AppendOwnedAnonBoxes/,
         // Assume that atomic accesses are threadsafe.
         /^__atomic_fetch_/,
         /^__atomic_load_/,
@@ -90,6 +92,7 @@ function checkOverridableVirtualCall(entry, location, callee)
         "Gecko_AddRefAtom",
         "Gecko_ReleaseAtom",
         /nsPrincipal::Get/,
+        /CounterStylePtr::Reset/,
     ];
     if (entry.matches(whitelist))
         return;
@@ -100,10 +103,6 @@ function checkOverridableVirtualCall(entry, location, callee)
 function checkIndirectCall(entry, location, callee)
 {
     var name = entry.name;
-
-    // replace_malloc indirects through this table.
-    if (callee.startsWith('malloc_table_t.'))
-        return;
 
     // These hash table callbacks should be threadsafe.
     if (/PLDHashTable/.test(name) && (/matchEntry/.test(callee) || /hashKey/.test(callee)))
@@ -117,12 +116,6 @@ function checkIndirectCall(entry, location, callee)
 function checkVariableAssignment(entry, location, variable)
 {
     var name = entry.name;
-
-    // Malloc related state.
-    if (/replace_malloc_initialized/.test(variable))
-        return;
-    if (name == "replace_init")
-        return;
 
     dumpError(entry, location, "Variable assignment " + variable);
 }
@@ -154,8 +147,10 @@ function treatAsSafeArgument(entry, varName, csuName)
         // to be a way to indicate which params are out parameters, either using
         // an attribute or a naming convention.
         ["Gecko_CopyFontFamilyFrom", "dst", null],
-        ["Gecko_SetListStyleType", "style_struct", null],
-        ["Gecko_CopyListStyleTypeFrom", "dst", null],
+        ["Gecko_SetCounterStyleToName", "aPtr", null],
+        ["Gecko_SetCounterStyleToSymbols", "aPtr", null],
+        ["Gecko_SetCounterStyleToString", "aPtr", null],
+        ["Gecko_CopyCounterStyle", "aDst", null],
         ["Gecko_SetMozBinding", "aDisplay", null],
         [/ClassOrClassList/, /aClass/, null],
         ["Gecko_GetAtomAsUTF16", "aLength", null],
@@ -166,13 +161,13 @@ function treatAsSafeArgument(entry, varName, csuName)
         ["Gecko_SetImageOrientationAsFromImage", "aVisibility", null],
         ["Gecko_CopyImageOrientationFrom", "aDst", null],
         ["Gecko_SetImageElement", "aImage", null],
-        ["Gecko_SetUrlImageValue", "aImage", null],
+        ["Gecko_SetLayerImageImageValue", "aImage", null],
         ["Gecko_CopyImageValueFrom", "aImage", null],
         ["Gecko_SetCursorArrayLength", "aStyleUI", null],
         ["Gecko_CopyCursorArrayFrom", "aDest", null],
-        ["Gecko_SetCursorImage", "aCursor", null],
+        ["Gecko_SetCursorImageValue", "aCursor", null],
+        ["Gecko_SetListStyleImageImageValue", "aList", null],
         ["Gecko_SetListStyleImageNone", "aList", null],
-        ["Gecko_SetListStyleImage", "aList", null],
         ["Gecko_CopyListStyleImageFrom", "aList", null],
         ["Gecko_ClearStyleContents", "aContent", null],
         ["Gecko_CopyStyleContentsFrom", "aContent", null],
@@ -187,12 +182,19 @@ function treatAsSafeArgument(entry, varName, csuName)
         ["Gecko_CSSFontFaceRule_GetCssText", "aResult", null],
         ["Gecko_EnsureTArrayCapacity", "aArray", null],
         ["Gecko_ClearPODTArray", "aArray", null],
+        ["Gecko_SetStyleGridTemplate", "aGridTemplate", null],
+        ["Gecko_ResizeTArrayForStrings", "aArray", null],
         ["Gecko_ClearAndResizeStyleContents", "aContent", null],
         [/Gecko_ClearAndResizeCounter/, "aContent", null],
         [/Gecko_CopyCounter.*?From/, "aContent", null],
+        [/Gecko_SetContentDataImageValue/, "aList", null],
         [/Gecko_SetContentData/, "aContent", null],
+        ["Gecko_SetCounterFunction", "aContent", null],
         [/Gecko_EnsureStyle.*?ArrayLength/, "aArray", null],
-        ["Gecko_AnimationAppendKeyframe", "aKeyframes", null],
+        ["Gecko_GetOrCreateKeyframeAtStart", "aKeyframes", null],
+        ["Gecko_GetOrCreateInitialKeyframe", "aKeyframes", null],
+        ["Gecko_GetOrCreateFinalKeyframe", "aKeyframes", null],
+        ["Gecko_AppendPropertyValuePair", "aProperties", null],
         ["Gecko_SetStyleCoordCalcValue", null, null],
         ["Gecko_StyleClipPath_SetURLValue", "aClip", null],
         ["Gecko_nsStyleFilter_SetURLValue", "aEffects", null],
@@ -212,7 +214,20 @@ function treatAsSafeArgument(entry, varName, csuName)
         ["Gecko_DestroyShapeSource", "aShape", null],
         ["Gecko_StyleShapeSource_SetURLValue", "aShape", null],
         ["Gecko_nsFont_InitSystem", "aDest", null],
+        ["Gecko_nsFont_SetFontFeatureValuesLookup", "aFont", null],
+        ["Gecko_nsFont_ResetFontFeatureValuesLookup", "aFont", null],
+        ["Gecko_nsStyleFont_FixupNoneGeneric", "aFont", null],
         ["Gecko_StyleTransition_SetUnsupportedProperty", "aTransition", null],
+        ["Gecko_AddPropertyToSet", "aPropertySet", null],
+        ["Gecko_CalcStyleDifference", "aAnyStyleChanged", null],
+        ["Gecko_nsStyleSVG_CopyContextProperties", "aDst", null],
+        ["Gecko_nsStyleFont_PrefillDefaultForGeneric", "aFont", null],
+        ["Gecko_nsStyleSVG_SetContextPropertiesLength", "aSvg", null],
+        ["Gecko_ClearAlternateValues", "aFont", null],
+        ["Gecko_AppendAlternateValues", "aFont", null],
+        ["Gecko_CopyAlternateValuesFrom", "aDest", null],
+        ["Gecko_CounterStyle_GetName", "aResult", null],
+        ["Gecko_CounterStyle_GetSingleString", "aResult", null],
     ];
     for (var [entryMatch, varMatch, csuMatch] of whitelist) {
         assert(entryMatch || varMatch || csuMatch);
@@ -239,7 +254,7 @@ function checkFieldWrite(entry, location, fields)
             return;
         if (/nsCOMPtr<.*?>.mRawPtr/.test(field))
             return;
-}
+    }
 
     var str = "";
     for (var field of fields)
@@ -316,6 +331,14 @@ function ignoreCallEdge(entry, callee)
         return true;
     }
 
+    // AllChildrenIterator asks AppendOwnedAnonBoxes to append into an nsTArray
+    // local variable.
+    if (/nsIFrame::AppendOwnedAnonBoxes/.test(callee) &&
+        /AllChildrenIterator::AppendNativeAnonymousChildren/.test(name))
+    {
+        return true;
+    }
+
     // Runnables are created and named on one thread, then dispatched
     // (possibly to another). Writes on the origin thread are ok.
     if (/::SetName/.test(callee) &&
@@ -326,7 +349,9 @@ function ignoreCallEdge(entry, callee)
 
     // We manually lock here
     if (name == "Gecko_nsFont_InitSystem" ||
-        name == "Gecko_GetFontMetrics")
+        name == "Gecko_GetFontMetrics" ||
+        name == "Gecko_nsStyleFont_FixupMinFontSize" ||
+        /ThreadSafeGetDefaultFontHelper/.test(name))
     {
         return true;
     }
@@ -347,11 +372,10 @@ function ignoreContents(entry)
 
         // These ought to be threadsafe.
         "NS_DebugBreak",
-        "replace_free", "replace_malloc",
         /mozalloc_handle_oom/,
         /^NS_Log/, /log_print/, /LazyLogModule::operator/,
         /SprintfLiteral/, "PR_smprintf", "PR_smprintf_free",
-        /NS_DispatchToMainThread/, /NS_ReleaseOnMainThread/,
+        /NS_DispatchToMainThread/, /NS_ReleaseOnMainThreadSystemGroup/,
         /NS_NewRunnableFunction/, /NS_Atomize/,
         /nsCSSValue::BufferFromString/,
         /NS_strdup/,
@@ -361,6 +385,7 @@ function ignoreContents(entry)
         "malloc",
         "free",
         "realloc",
+        "jemalloc_thread_local_arena",
         /profiler_register_thread/,
         /profiler_unregister_thread/,
 
@@ -373,26 +398,36 @@ function ignoreContents(entry)
 
         // The analysis can't cope with the indirection used for the objects
         // being initialized here.
-        "Gecko_AnimationAppendKeyframe",
+        "Gecko_GetOrCreateKeyframeAtStart",
+        "Gecko_GetOrCreateInitialKeyframe",
+        "Gecko_GetOrCreateFinalKeyframe",
         "Gecko_NewStyleQuoteValues",
         "Gecko_NewCSSValueSharedList",
+        "Gecko_NewNoneTransform",
         "Gecko_NewGridTemplateAreasValue",
         /nsCSSValue::SetCalcValue/,
         /CSSValueSerializeCalcOps::Append/,
         "Gecko_CSSValue_SetFunction",
         "Gecko_CSSValue_SetArray",
+        "Gecko_CSSValue_InitSharedList",
         "Gecko_EnsureMozBorderColors",
         "Gecko_ClearMozBorderColors",
         "Gecko_AppendMozBorderColors",
         "Gecko_CopyMozBorderColors",
+        "Gecko_SetNullImageValue",
+
+        // The analysis thinks we'll write to mBits in the DoGetStyleFoo<false>
+        // call.  Maybe the template parameter confuses it?
+        /nsStyleContext::PeekStyle/,
 
         // Needs main thread assertions or other fixes.
         /UndisplayedMap::GetEntryFor/,
-        /nsStyleContext::CalcStyleDifferenceInternal/,
         /EffectCompositor::GetServoAnimationRule/,
         /LookAndFeel::GetColor/,
         "Gecko_CopyStyleContentsFrom",
         "Gecko_CSSValue_SetAbsoluteLength",
+        "Gecko_UnsetDirtyStyleAttr",
+        /nsCSSPropertyIDSet::AddProperty/,
     ];
     if (entry.matches(whitelist))
         return true;
@@ -416,7 +451,7 @@ function ignoreContents(entry)
             /nsAC?String::Replace/,
             /nsAC?String::Trim/,
             /nsAC?String::Truncate/,
-            /nsString::StripChars/,
+            /nsAString::StripTaggedASCII/,
             /nsAC?String::operator=/,
             /nsAutoString::nsAutoString/,
             /nsFixedCString::nsFixedCString/,

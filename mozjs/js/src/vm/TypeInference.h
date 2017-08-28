@@ -146,8 +146,8 @@ enum : uint32_t {
     /* Whether any objects have been iterated over. */
     OBJECT_FLAG_ITERATED              = 0x00080000,
 
-    /* Whether any object this represents may be frozen. */
-    OBJECT_FLAG_FROZEN                = 0x00100000,
+    /* Whether any object this represents may have frozen elements. */
+    OBJECT_FLAG_FROZEN_ELEMENTS       = 0x00100000,
 
     /*
      * For the function on a run-once script, whether the function has actually
@@ -544,6 +544,8 @@ static const uintptr_t ConstraintTypeSetMagic = BaseTypeInferenceMagic + 2;
 #ifdef JS_CRASH_DIAGNOSTICS
 extern void
 ReportMagicWordFailure(uintptr_t actual, uintptr_t expected);
+extern void
+ReportMagicWordFailure(uintptr_t actual, uintptr_t expected, uintptr_t flags, uintptr_t objectSet);
 #endif
 
 /*
@@ -674,7 +676,7 @@ class ConstraintTypeSet : public TypeSet
     void checkMagic() const {
 #ifdef JS_CRASH_DIAGNOSTICS
         if (MOZ_UNLIKELY(magic_ != ConstraintTypeSetMagic))
-            ReportMagicWordFailure(magic_, ConstraintTypeSetMagic);
+            ReportMagicWordFailure(magic_, ConstraintTypeSetMagic, uintptr_t(flags), uintptr_t(objectSet));
 #endif
     }
 
@@ -826,6 +828,9 @@ class TemporaryTypeSet : public TypeSet
 
     /* Whether clasp->isCallable() is true for one or more objects in this set. */
     bool maybeCallable(CompilerConstraintList* constraints);
+
+    /* Whether clasp->isProxy() might be true for one or more objects in this set. */
+    bool maybeProxy(CompilerConstraintList* constraints);
 
     /* Whether clasp->emulatesUndefined() is true for one or more objects in this set. */
     bool maybeEmulatesUndefined(CompilerConstraintList* constraints);
@@ -1239,6 +1244,9 @@ class TypeScript
     static inline void Monitor(JSContext* cx, JSScript* script, jsbytecode* pc,
                                TypeSet::Type type);
     static inline void Monitor(JSContext* cx, const js::Value& rval);
+
+    static inline void Monitor(JSContext* cx, JSScript* script, jsbytecode* pc,
+                               StackTypeSet* types, const js::Value& val);
 
     /* Monitor an assignment at a SETELEM on a non-integer identifier. */
     static inline void MonitorAssign(JSContext* cx, HandleObject obj, jsid id);

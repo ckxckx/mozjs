@@ -105,14 +105,19 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
     profilerSampleBufferGen_(0),
     profilerSampleBufferLapCount_(1),
     telemetryCallback(nullptr),
-    startAsyncTaskCallback(nullptr),
-    finishAsyncTaskCallback(nullptr),
-    promiseTasksToDestroy(mutexid::PromiseTaskPtrVector),
+    readableStreamDataRequestCallback(nullptr),
+    readableStreamWriteIntoReadRequestCallback(nullptr),
+    readableStreamCancelCallback(nullptr),
+    readableStreamClosedCallback(nullptr),
+    readableStreamErroredCallback(nullptr),
+    readableStreamFinalizeCallback(nullptr),
     hadOutOfMemory(false),
     allowRelazificationForTesting(false),
     destroyCompartmentCallback(nullptr),
     sizeOfIncludingThisCompartmentCallback(nullptr),
     compartmentNameCallback(nullptr),
+    destroyRealmCallback(nullptr),
+    realmNameCallback(nullptr),
     externalStringSizeofCallback(nullptr),
     securityCallbacks(&NullSecurityCallbacks),
     DOMcallbacks(nullptr),
@@ -156,6 +161,7 @@ JSRuntime::JSRuntime(JSRuntime* parentRuntime)
     beingDestroyed_(false),
     allowContentJS_(true),
     atoms_(nullptr),
+    atomsAddedWhileSweeping_(nullptr),
     atomsCompartment_(nullptr),
     staticStrings(nullptr),
     commonNames(nullptr),
@@ -316,8 +322,6 @@ JSRuntime::destroyRuntime()
 
     AutoNoteSingleThreadedRegion anstr;
 
-    MOZ_ASSERT_IF(!geckoProfiler().enabled(), !singleThreadedExecutionRequired_);
-
     MOZ_ASSERT(!hasHelperThreadZones());
     AutoLockForExclusiveAccess lock(this);
 
@@ -438,6 +442,19 @@ void
 JSRuntime::setTelemetryCallback(JSRuntime* rt, JSAccumulateTelemetryDataCallback callback)
 {
     rt->telemetryCallback = callback;
+}
+
+void
+JSRuntime::setUseCounter(JSObject* obj, JSUseCounter counter)
+{
+    if (useCounterCallback)
+        (*useCounterCallback)(obj, counter);
+}
+
+void
+JSRuntime::setUseCounterCallback(JSRuntime* rt, JSSetUseCounterCallback callback)
+{
+    rt->useCounterCallback = callback;
 }
 
 void
@@ -574,11 +591,11 @@ JSContext::requestInterrupt(InterruptMode mode)
     jitStackLimit = UINTPTR_MAX;
 
     if (mode == JSContext::RequestInterruptUrgent) {
-        // If this interrupt is urgent (slow script dialog and garbage
-        // collection among others), take additional steps to
-        // interrupt corner cases where the above fields are not
-        // regularly polled.  Wake both ilooping JIT code and
-        // Atomics.wait().
+        // If this interrupt is urgent (slow script dialog for instance), take
+        // additional steps to interrupt corner cases where the above fields are
+        // not regularly polled. Wake ilooping Ion code, irregexp JIT code and
+        // Atomics.wait()
+        interruptRegExpJit_ = true;
         fx.lock();
         if (fx.isWaiting())
             fx.wake(FutexThread::WakeForJSInterrupt);
@@ -593,6 +610,7 @@ JSContext::handleInterrupt()
     MOZ_ASSERT(CurrentThreadCanAccessRuntime(runtime()));
     if (interrupt_ || jitStackLimit == UINTPTR_MAX) {
         interrupt_ = false;
+        interruptRegExpJit_ = false;
         resetJitStackLimit();
         return InvokeInterruptCallback(this);
     }
@@ -694,8 +712,13 @@ FreeOp::isDefaultFreeOp() const
 JSObject*
 JSRuntime::getIncumbentGlobal(JSContext* cx)
 {
-    MOZ_ASSERT(cx->getIncumbentGlobalCallback,
-               "Must set a callback using SetGetIncumbentGlobalCallback before using Promises");
+    // If the embedding didn't set a callback for getting the incumbent
+    // global, the currently active global is used.
+    if (!cx->getIncumbentGlobalCallback) {
+        if (!cx->compartment())
+            return nullptr;
+        return cx->global();
+    }
 
     return cx->getIncumbentGlobalCallback(cx);
 }
@@ -838,6 +861,34 @@ JSRuntime::activeGCInAtomsZone()
            zone->wasGCStarted();
 }
 
+bool
+JSRuntime::createAtomsAddedWhileSweepingTable()
+{
+    MOZ_ASSERT(JS::CurrentThreadIsHeapCollecting());
+    MOZ_ASSERT(!atomsAddedWhileSweeping_);
+
+    atomsAddedWhileSweeping_ = js_new<AtomSet>();
+    if (!atomsAddedWhileSweeping_)
+        return false;
+
+    if (!atomsAddedWhileSweeping_->init()) {
+        destroyAtomsAddedWhileSweepingTable();
+        return false;
+    }
+
+    return true;
+}
+
+void
+JSRuntime::destroyAtomsAddedWhileSweepingTable()
+{
+    MOZ_ASSERT(JS::CurrentThreadIsHeapCollecting());
+    MOZ_ASSERT(atomsAddedWhileSweeping_);
+
+    js_delete(atomsAddedWhileSweeping_.ref());
+    atomsAddedWhileSweeping_ = nullptr;
+}
+
 void
 JSRuntime::setUsedByHelperThread(Zone* zone)
 {
@@ -853,8 +904,9 @@ JSRuntime::clearUsedByHelperThread(Zone* zone)
     MOZ_ASSERT(zone->group()->usedByHelperThread);
     zone->group()->usedByHelperThread = false;
     numHelperThreadZones--;
-    if (gc.fullGCForAtomsRequested() && !TlsContext.get())
-        gc.triggerFullGCForAtoms();
+    JSContext* cx = TlsContext.get();
+    if (gc.fullGCForAtomsRequested() && cx->canCollectAtoms())
+        gc.triggerFullGCForAtoms(cx);
 }
 
 bool
@@ -897,7 +949,7 @@ JS::IsProfilingEnabledForContext(JSContext* cx)
 }
 
 JS_PUBLIC_API(void)
-JS::shadow::RegisterWeakCache(JSRuntime* rt, WeakCache<void*>* cachep)
+JS::shadow::RegisterWeakCache(JSRuntime* rt, detail::WeakCacheBase* cachep)
 {
     rt->registerWeakCache(cachep);
 }

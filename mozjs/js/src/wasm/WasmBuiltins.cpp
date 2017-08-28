@@ -37,7 +37,6 @@ using namespace js;
 using namespace jit;
 using namespace wasm;
 
-using mozilla::Atomic;
 using mozilla::BinarySearchIf;
 using mozilla::HashGeneric;
 using mozilla::IsNaN;
@@ -61,10 +60,22 @@ __aeabi_uidivmod(int, int);
 }
 #endif
 
+// This utility function can only be called for builtins that are called
+// directly from wasm code. Note that WasmCall pushes both an outer
+// WasmActivation and an inner JitActivation that becomes active when calling
+// JIT code.
+static WasmActivation*
+CallingActivation()
+{
+    Activation* act = TlsContext.get()->activation();
+    MOZ_ASSERT(!act->asJit()->isActive(), "WasmCall pushes an inactive JitActivation");
+    return act->prev()->asWasm();
+}
+
 static void*
 WasmHandleExecutionInterrupt()
 {
-    WasmActivation* activation = JSContext::innermostWasmActivation();
+    WasmActivation* activation = CallingActivation();
     MOZ_ASSERT(activation->interrupted());
 
     if (!CheckForInterrupt(activation->cx())) {
@@ -86,22 +97,22 @@ WasmHandleExecutionInterrupt()
 static bool
 WasmHandleDebugTrap()
 {
-    WasmActivation* activation = JSContext::innermostWasmActivation();
+    WasmActivation* activation = CallingActivation();
     MOZ_ASSERT(activation);
     JSContext* cx = activation->cx();
 
-    FrameIterator iter(activation);
-    MOZ_ASSERT(iter.debugEnabled());
-    const CallSite* site = iter.debugTrapCallsite();
+    WasmFrameIter frame(activation);
+    MOZ_ASSERT(frame.debugEnabled());
+    const CallSite* site = frame.debugTrapCallsite();
     MOZ_ASSERT(site);
     if (site->kind() == CallSite::EnterFrame) {
-        if (!iter.instance()->enterFrameTrapsEnabled())
+        if (!frame.instance()->enterFrameTrapsEnabled())
             return true;
-        DebugFrame* frame = iter.debugFrame();
-        frame->setIsDebuggee();
-        frame->observe(cx);
+        DebugFrame* debugFrame = frame.debugFrame();
+        debugFrame->setIsDebuggee();
+        debugFrame->observe(cx);
         // TODO call onEnterFrame
-        JSTrapStatus status = Debugger::onEnterFrame(cx, frame);
+        JSTrapStatus status = Debugger::onEnterFrame(cx, debugFrame);
         if (status == JSTRAP_RETURN) {
             // Ignoring forced return (JSTRAP_RETURN) -- changing code execution
             // order is not yet implemented in the wasm baseline.
@@ -112,17 +123,17 @@ WasmHandleDebugTrap()
         return status == JSTRAP_CONTINUE;
     }
     if (site->kind() == CallSite::LeaveFrame) {
-        DebugFrame* frame = iter.debugFrame();
-        frame->updateReturnJSValue();
-        bool ok = Debugger::onLeaveFrame(cx, frame, nullptr, true);
-        frame->leave(cx);
+        DebugFrame* debugFrame = frame.debugFrame();
+        debugFrame->updateReturnJSValue();
+        bool ok = Debugger::onLeaveFrame(cx, debugFrame, nullptr, true);
+        debugFrame->leave(cx);
         return ok;
     }
 
-    DebugFrame* frame = iter.debugFrame();
-    DebugState& debug = iter.instance()->debug();
+    DebugFrame* debugFrame = frame.debugFrame();
+    DebugState& debug = frame.instance()->debug();
     MOZ_ASSERT(debug.hasBreakpointTrapAtOffset(site->lineOrBytecode()));
-    if (debug.stepModeEnabled(frame->funcIndex())) {
+    if (debug.stepModeEnabled(debugFrame->funcIndex())) {
         RootedValue result(cx, UndefinedValue());
         JSTrapStatus status = Debugger::onSingleStep(cx, &result);
         if (status == JSTRAP_RETURN) {
@@ -147,29 +158,33 @@ WasmHandleDebugTrap()
     return true;
 }
 
-static WasmActivation*
+// Unwind the entire activation in response to a thrown exception. This function
+// is responsible for notifying the debugger of each unwound frame. The return
+// value is the new stack address which the calling stub will set to the sp
+// register before executing a return instruction.
+static void*
 WasmHandleThrow()
 {
-    JSContext* cx = TlsContext.get();
+    WasmActivation* activation = CallingActivation();
+    JSContext* cx = activation->cx();
 
-    WasmActivation* activation = cx->wasmActivationStack();
-    MOZ_ASSERT(activation);
-
-    // FrameIterator iterates down wasm frames in the activation starting at
+    // WasmFrameIter iterates down wasm frames in the activation starting at
     // WasmActivation::exitFP. Pass Unwind::True to pop WasmActivation::exitFP
-    // once each time FrameIterator is incremented, ultimately leaving exitFP
-    // null when the FrameIterator is done(). This is necessary to prevent a
+    // once each time WasmFrameIter is incremented, ultimately leaving exitFP
+    // null when the WasmFrameIter is done().  This is necessary to prevent a
     // DebugFrame from being observed again after we just called onLeaveFrame
     // (which would lead to the frame being re-added to the map of live frames,
     // right as it becomes trash).
-    FrameIterator iter(activation, FrameIterator::Unwind::True);
-    if (iter.done()) {
-        MOZ_ASSERT(!activation->interrupted());
-        return activation;
-    }
+    //
+    // TODO(bug 1360211): when JitActivation and WasmActivation get merged,
+    // we'll be able to switch to ion / other wasm state from here, and we'll
+    // need to do things differently.
+
+    WasmFrameIter iter(activation, WasmFrameIter::Unwind::True);
+    MOZ_ASSERT(!iter.done());
 
     // Live wasm code on the stack is kept alive (in wasm::TraceActivations) by
-    // marking the instance of every wasm::Frame found by FrameIterator.
+    // marking the instance of every wasm::Frame found by WasmFrameIter.
     // However, as explained above, we're popping frames while iterating which
     // means that a GC during this loop could collect the code of frames whose
     // code is still on the stack. This is actually mostly fine: as soon as we
@@ -208,13 +223,13 @@ WasmHandleThrow()
      }
 
     MOZ_ASSERT(!activation->interrupted(), "unwinding clears the interrupt");
-    return activation;
+    return iter.unwoundAddressOfReturnAddress();
 }
 
 static void
 WasmReportTrap(int32_t trapIndex)
 {
-    JSContext* cx = JSContext::innermostWasmActivation()->cx();
+    JSContext* cx = TlsContext.get();
 
     MOZ_ASSERT(trapIndex < int32_t(Trap::Limit) && trapIndex >= 0);
     Trap trap = Trap(trapIndex);
@@ -258,21 +273,21 @@ WasmReportTrap(int32_t trapIndex)
 static void
 WasmReportOutOfBounds()
 {
-    JSContext* cx = JSContext::innermostWasmActivation()->cx();
+    JSContext* cx = TlsContext.get();
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_WASM_OUT_OF_BOUNDS);
 }
 
 static void
 WasmReportUnalignedAccess()
 {
-    JSContext* cx = JSContext::innermostWasmActivation()->cx();
+    JSContext* cx = TlsContext.get();
     JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_WASM_UNALIGNED_ACCESS);
 }
 
 static int32_t
 CoerceInPlace_ToInt32(MutableHandleValue val)
 {
-    JSContext* cx = JSContext::innermostWasmActivation()->cx();
+    JSContext* cx = TlsContext.get();
 
     int32_t i32;
     if (!ToInt32(cx, val, &i32))
@@ -285,7 +300,7 @@ CoerceInPlace_ToInt32(MutableHandleValue val)
 static int32_t
 CoerceInPlace_ToNumber(MutableHandleValue val)
 {
-    JSContext* cx = JSContext::innermostWasmActivation()->cx();
+    JSContext* cx = TlsContext.get();
 
     double dbl;
     if (!ToNumber(cx, val, &dbl))
