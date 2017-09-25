@@ -5,13 +5,11 @@
 #![crate_name = "js"]
 #![crate_type = "rlib"]
 
-#![feature(link_args)]
-#![feature(nonzero)]
-#![feature(const_fn)]
-#![feature(untagged_unions)]
+#![cfg_attr(feature = "nonzero", feature(nonzero))]
 
 #![allow(non_upper_case_globals, non_camel_case_types, non_snake_case, improper_ctypes)]
 
+#[cfg(feature = "nonzero")]
 extern crate core;
 #[macro_use]
 extern crate heapsize;
@@ -20,6 +18,7 @@ extern crate lazy_static;
 extern crate libc;
 #[macro_use]
 extern crate log;
+#[allow(unused_extern_crates)]
 extern crate mozjs_sys;
 extern crate num_traits;
 

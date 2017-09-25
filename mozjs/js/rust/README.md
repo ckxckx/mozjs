@@ -17,11 +17,11 @@ To build with SpiderMonkey's DEBUG checks and assertions:
 $ cargo build --features debugmozjs
 ```
 
-Raw FFI bindings to JSAPI are machine generated
-with [`servo/rust-bindgen`][bindgen], and requires libclang 3.9. See
+Raw FFI bindings to JSAPI are machine generated with
+[`rust-lang-nursery/rust-bindgen`][bindgen], and requires libclang >= 3.9. See
 `./build.rs` for details.
 
-[bindgen]: https://github.com/servo/rust-bindgen
+[bindgen]: https://github.com/rust-lang-nursery/rust-bindgen
 
 ## Cargo Features
 
@@ -30,6 +30,8 @@ with [`servo/rust-bindgen`][bindgen], and requires libclang 3.9. See
   in debug or release mode.
 
 * `promises`: Enable SpiderMonkey native promises.
+
+* `nonzero`: Leverage the unstable `NonZero` type. Requires nightly Rust.
 
 ## Testing
 

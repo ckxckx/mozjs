@@ -1254,8 +1254,8 @@ ArrayBufferObject::trace(JSTracer* trc, JSObject* obj)
     buf.setSlot(DATA_SLOT, PrivateValue(view->as<InlineTransparentTypedObject>().inlineTypedMem()));
 }
 
-/* static */ void
-ArrayBufferObject::objectMoved(JSObject* obj, const JSObject* old)
+/* static */ size_t
+ArrayBufferObject::objectMoved(JSObject* obj, JSObject* old)
 {
     ArrayBufferObject& dst = obj->as<ArrayBufferObject>();
     const ArrayBufferObject& src = old->as<ArrayBufferObject>();
@@ -1263,6 +1263,8 @@ ArrayBufferObject::objectMoved(JSObject* obj, const JSObject* old)
     // Fix up possible inline data pointer.
     if (src.hasInlineData())
         dst.setSlot(DATA_SLOT, PrivateValue(dst.inlineDataPointer()));
+
+    return 0;
 }
 
 ArrayBufferViewObject*
@@ -1608,7 +1610,7 @@ JS_GetArrayBufferByteLength(JSObject* obj)
 }
 
 JS_FRIEND_API(uint8_t*)
-JS_GetArrayBufferData(JSObject* obj, bool* isSharedMemory, const JS::AutoCheckCannotGC&)
+JS_GetArrayBufferData(JSObject* obj, bool* isSharedMemory, const JS::AutoRequireNoGC&)
 {
     obj = CheckedUnwrap(obj);
     if (!obj)
@@ -1824,7 +1826,7 @@ JS_IsMappedArrayBufferObject(JSObject* obj)
 }
 
 JS_FRIEND_API(void*)
-JS_GetArrayBufferViewData(JSObject* obj, bool* isSharedMemory, const JS::AutoCheckCannotGC&)
+JS_GetArrayBufferViewData(JSObject* obj, bool* isSharedMemory, const JS::AutoRequireNoGC&)
 {
     obj = CheckedUnwrap(obj);
     if (!obj)

@@ -27,7 +27,9 @@
 
 #![deny(missing_docs)]
 
+#[cfg(feature = "nonzero")]
 use core::nonzero::NonZero;
+
 use error::throw_type_error;
 use glue::RUST_JS_NumberValue;
 use heap::Heap;
@@ -35,8 +37,7 @@ use jsapi::root::*;
 use jsval::{BooleanValue, Int32Value, NullValue, UInt32Value, UndefinedValue};
 use jsval::{ObjectValue, ObjectOrNullValue, StringValue};
 use rust::{ToBoolean, ToInt32, ToInt64, ToNumber, ToUint16, ToUint32, ToUint64};
-use rust::{ToString, maybe_wrap_object_or_null_value};
-use rust::{maybe_wrap_object_value, maybe_wrap_value};
+use rust::{ToString, maybe_wrap_object_or_null_value, maybe_wrap_value};
 use libc;
 use num_traits::{Bounded, Zero};
 use std::borrow::Cow;
@@ -562,8 +563,13 @@ impl<T: ToJSValConvertible> ToJSValConvertible for Vec<T> {
         for (index, obj) in self.iter().enumerate() {
             obj.to_jsval(cx, val.handle_mut());
 
-            assert!(JS_DefineElement(cx, js_array.handle(),
-                                     index as u32, val.handle(), JSPROP_ENUMERATE as _, None, None));
+            assert!(JS_DefineElement(
+                cx,
+                js_array.handle(),
+                index as u32,
+                val.handle(),
+                JSPROP_ENUMERATE as _
+            ));
         }
 
         rval.set(ObjectValue(js_array.handle().get()));
@@ -653,9 +659,11 @@ impl ToJSValConvertible for *mut JSObject {
 }
 
 // https://heycam.github.io/webidl/#es-object
+#[cfg(feature = "nonzero")]
 impl ToJSValConvertible for NonZero<*mut JSObject> {
     #[inline]
     unsafe fn to_jsval(&self, cx: *mut JSContext, rval: JS::MutableHandleValue) {
+        use rust::maybe_wrap_object_value;
         rval.set(ObjectValue(self.get()));
         maybe_wrap_object_value(cx, rval);
     }

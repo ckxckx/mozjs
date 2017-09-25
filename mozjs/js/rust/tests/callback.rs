@@ -2,8 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-extern crate mozjs_sys;
-
 #[macro_use]
 extern crate js;
 extern crate libc;
@@ -27,7 +25,7 @@ use std::str;
 
 #[test]
 fn callback() {
-    let runtime = Runtime::new().unwrap();
+    let runtime = Runtime::new(false).unwrap();
     let context = runtime.cx();
     let h_option = OnNewGlobalHookOption::FireOnNewGlobalHook;
     let c_option = CompartmentOptions::default();

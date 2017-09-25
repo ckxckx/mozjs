@@ -577,7 +577,7 @@ ModuleEnvironmentObject::setProperty(JSContext* cx, HandleObject obj, HandleId i
     if (self->importBindings().has(id))
         return result.failReadOnly();
 
-    return NativeSetProperty(cx, self, id, v, receiver, Qualified, result);
+    return NativeSetProperty<Qualified>(cx, self, id, v, receiver, result);
 }
 
 /* static */ bool
@@ -977,7 +977,8 @@ LexicalEnvironmentObject::createGlobal(JSContext* cx, Handle<GlobalObject*> glob
 }
 
 /* static */ LexicalEnvironmentObject*
-LexicalEnvironmentObject::createNonSyntactic(JSContext* cx, HandleObject enclosing)
+LexicalEnvironmentObject::createNonSyntactic(JSContext* cx, HandleObject enclosing,
+                                             HandleObject thisv)
 {
     MOZ_ASSERT(enclosing);
     MOZ_ASSERT(!IsSyntacticEnvironment(enclosing));
@@ -991,7 +992,8 @@ LexicalEnvironmentObject::createNonSyntactic(JSContext* cx, HandleObject enclosi
     if (!env)
         return nullptr;
 
-    env->initThisValue(enclosing);
+    env->initThisValue(thisv);
+
     return env;
 }
 
@@ -1067,11 +1069,11 @@ LexicalEnvironmentObject::thisValue() const
     MOZ_ASSERT(isExtensible());
     Value v = getReservedSlot(THIS_VALUE_OR_SCOPE_SLOT);
     if (v.isObject()) {
-        // If `v` is a Window, return the WindowProxy instead. We called
-        // GetThisValue (which also does ToWindowProxyIfWindow) when storing
-        // the value in THIS_VALUE_OR_SCOPE_SLOT, but it's possible the
-        // WindowProxy was attached to the global *after* we set
-        // THIS_VALUE_OR_SCOPE_SLOT.
+        // A WindowProxy may have been attached after this environment was
+        // created so check ToWindowProxyIfWindow again. For example,
+        // GlobalObject::createInternal will construct its lexical environment
+        // before SetWindowProxy can be called.
+        // See also: js::GetThisValue / js::GetThisValueOfLexical
         return ObjectValue(*ToWindowProxyIfWindow(&v.toObject()));
     }
     return v;
@@ -2420,8 +2422,8 @@ DebugEnvironmentProxy::isOptimizedOut() const
 DebugEnvironments::DebugEnvironments(JSContext* cx, Zone* zone)
  : zone_(zone),
    proxiedEnvs(cx),
-   missingEnvs(cx->runtime()),
-   liveEnvs(cx->runtime())
+   missingEnvs(cx->zone()),
+   liveEnvs(cx->zone())
 {}
 
 DebugEnvironments::~DebugEnvironments()
@@ -3185,7 +3187,8 @@ js::CreateObjectsForEnvironmentChain(JSContext* cx, AutoObjectVector& chain,
 #ifdef DEBUG
     for (size_t i = 0; i < chain.length(); ++i) {
         assertSameCompartment(cx, chain[i]);
-        MOZ_ASSERT(!chain[i]->is<GlobalObject>());
+        MOZ_ASSERT(!chain[i]->is<GlobalObject>() &&
+                   !chain[i]->is<NonSyntacticVariablesObject>());
     }
 #endif
 

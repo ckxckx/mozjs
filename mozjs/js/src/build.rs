@@ -33,6 +33,11 @@ fn main() {
                "--no-jemalloc",
                "--objdir", &out_dir,
                variant])
+        .args(if cfg!(feature = "debugmozjs") {
+            &["--debug", "--no-optimize"]
+        } else {
+            &["--no-debug", "--optimize"]
+        })
         .env("SOURCE", &js_src)
         .env("PWD", &js_src)
         .env("AUTOMATION", "1")

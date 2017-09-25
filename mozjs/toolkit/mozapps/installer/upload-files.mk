@@ -335,7 +335,7 @@ endif
 
 ifneq (android,$(MOZ_WIDGET_TOOLKIT))
   OPTIMIZEJARS = 1
-  DISABLE_JAR_COMPRESSION = 1
+  JAR_COMPRESSION ?= none
 endif
 
 # A js binary is needed to perform verification of JavaScript minification.
@@ -419,7 +419,9 @@ endif
 
 ifdef MOZ_CODE_COVERAGE
   UPLOAD_FILES += \
-    $(call QUOTED_WILDCARD,$(DIST)/$(PKG_PATH)$(CODE_COVERAGE_ARCHIVE_BASENAME).zip)
+    $(call QUOTED_WILDCARD,$(DIST)/$(PKG_PATH)$(CODE_COVERAGE_ARCHIVE_BASENAME).zip) \
+    $(call QUOTED_WILDCARD,$(topobjdir)/chrome-map.json) \
+    $(NULL)
 endif
 
 ifdef MOZ_STYLO

@@ -65,13 +65,14 @@ fn get_mozjs_include_dir() -> path::PathBuf {
 /// generated, see the `const` configuration variables below.
 fn build_jsapi_bindings() {
     let mut builder = bindgen::builder()
-        .unstable_rust(true)
+        .rust_target(bindgen::RustTarget::Stable_1_19)
         .header("./etc/wrapper.hpp")
         .raw_line("pub use self::root::*;")
         .enable_cxx_namespaces();
 
     if cfg!(feature = "debugmozjs") {
         builder = builder
+            .clang_arg("-DJS_GC_ZEAL")
             .clang_arg("-DDEBUG")
             .clang_arg("-DJS_DEBUG");
     }
@@ -113,11 +114,17 @@ fn build_jsapi_bindings() {
     let bindings = builder.generate()
         .expect("Should generate JSAPI bindings OK");
 
-    bindings.write_to_file("./src/jsapi.rs")
-        .expect("Should write bindings to file OK");
+    let out = path::PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    if cfg!(feature = "debugmozjs") {
+        bindings.write_to_file(out.join("jsapi_debug.rs"))
+            .expect("Should write bindings to file OK");
+    } else {
+        bindings.write_to_file(out.join("jsapi.rs"))
+            .expect("Should write bindings to file OK");
+    }
 
     println!("cargo:rerun-if-changed=etc/wrapper.hpp");
-    println!("cargo:rerun-if-changed=src/jsapi.rs");
 }
 
 /// JSAPI types for which we should implement `Sync`.
@@ -310,6 +317,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_EnumerateStandardClasses",
     "JS_ErrorFromException",
     "JS_FireOnNewGlobalObject",
+    "JS_free",
     "JS_GC",
     "JS_GetArrayBufferData",
     "JS_GetArrayBufferViewType",
@@ -374,11 +382,13 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_ReadBytes",
     "JS_ReadStructuredClone",
     "JS_ReadUint32Pair",
+    "JS_RemoveExtraGCRootsTracer",
     "js::RemoveRawValueRoot",
     "JS_ReportErrorASCII",
     "JS_ReportErrorNumberUTF8",
     "JS_RequestInterruptCallback",
     "JS_ResolveStandardClass",
+    "js::RunJobs",
     "JS_SameValue",
     "js::SetDOMCallbacks",
     "js::SetDOMProxyInformation",
@@ -396,6 +406,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_SetParallelParsingEnabled",
     "JS_SetPendingException",
     "js::SetPreserveWrapperCallback",
+    "JS::SetPromiseRejectionTrackerCallback",
     "JS_SetPrototype",
     "js::SetWindowProxy",
     "js::SetWindowProxyClass",
@@ -404,6 +415,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_SetWrapObjectCallbacks",
     "JS_ShutDown",
     "JS_SplicePrototype",
+    "js::StopDrainingJobQueue",
     "JS_StrictPropertyStub",
     "JS_StringEqualsAscii",
     "JS_StringHasLatin1Chars",
@@ -437,6 +449,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "js::UnwrapUint32Array",
     "js::UnwrapUint8Array",
     "js::UnwrapUint8ClampedArray",
+    "js::UseInternalJobQueues",
 ];
 
 /// Types that should be treated as an opaque blob of bytes whenever they show

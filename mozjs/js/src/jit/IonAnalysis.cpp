@@ -211,6 +211,7 @@ FlagAllOperandsAsHavingRemovedUses(MIRGenerator* mir, MBasicBlock* block)
         if (MResumePoint* rp = ins->resumePoint()) {
             // Note: no need to iterate over the caller's of the resume point as
             // this is the same as the entry resume point.
+            MOZ_ASSERT(&rp->block()->info() == &info);
             for (size_t i = 0, e = rp->numOperands(); i < e; i++) {
                 if (info.isObservableSlot(i))
                     rp->getOperand(i)->setUseRemovedUnchecked();
@@ -224,6 +225,7 @@ FlagAllOperandsAsHavingRemovedUses(MIRGenerator* mir, MBasicBlock* block)
         if (mir->shouldCancel("FlagAllOperandsAsHavingRemovedUses loop 2"))
             return false;
 
+        const CompileInfo& info = rp->block()->info();
         for (size_t i = 0, e = rp->numOperands(); i < e; i++) {
             if (info.isObservableSlot(i))
                 rp->getOperand(i)->setUseRemovedUnchecked();
@@ -4264,7 +4266,7 @@ jit::AnalyzeNewScriptDefiniteProperties(JSContext* cx, HandleFunction fun,
 
     // Get a list of instructions using the |this| value in the order they
     // appear in the graph.
-    Vector<MInstruction*> instructions(cx);
+    Vector<MInstruction*, 4> instructions(cx);
 
     for (MUseDefIterator uses(thisValue); uses; uses++) {
         MDefinition* use = uses.def();

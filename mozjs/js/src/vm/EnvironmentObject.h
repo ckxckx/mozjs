@@ -510,7 +510,8 @@ class LexicalEnvironmentObject : public EnvironmentObject
     static LexicalEnvironmentObject* create(JSContext* cx, Handle<LexicalScope*> scope,
                                             AbstractFramePtr frame);
     static LexicalEnvironmentObject* createGlobal(JSContext* cx, Handle<GlobalObject*> global);
-    static LexicalEnvironmentObject* createNonSyntactic(JSContext* cx, HandleObject enclosing);
+    static LexicalEnvironmentObject* createNonSyntactic(JSContext* cx, HandleObject enclosing,
+                                                        HandleObject thisv);
     static LexicalEnvironmentObject* createHollowForDebug(JSContext* cx,
                                                           Handle<LexicalScope*> scope);
 
@@ -948,7 +949,7 @@ class DebugEnvironments
     typedef HashMap<MissingEnvironmentKey,
                     ReadBarrieredDebugEnvironmentProxy,
                     MissingEnvironmentKey,
-                    RuntimeAllocPolicy> MissingEnvironmentMap;
+                    ZoneAllocPolicy> MissingEnvironmentMap;
     MissingEnvironmentMap missingEnvs;
 
     /*
@@ -962,7 +963,7 @@ class DebugEnvironments
     typedef GCHashMap<ReadBarriered<JSObject*>,
                       LiveEnvironmentVal,
                       MovableCellHasher<ReadBarriered<JSObject*>>,
-                      RuntimeAllocPolicy> LiveEnvironmentMap;
+                      ZoneAllocPolicy> LiveEnvironmentMap;
     LiveEnvironmentMap liveEnvs;
 
   public:
@@ -1081,6 +1082,14 @@ IsGlobalLexicalEnvironment(JSObject* env)
 {
     return env->is<LexicalEnvironmentObject>() &&
            env->as<LexicalEnvironmentObject>().isGlobal();
+}
+
+inline bool
+IsNSVOLexicalEnvironment(JSObject* env)
+{
+    return env->is<LexicalEnvironmentObject>() &&
+           env->as<LexicalEnvironmentObject>().enclosingEnvironment()
+                                              .is<NonSyntacticVariablesObject>();
 }
 
 inline JSObject*

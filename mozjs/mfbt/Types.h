@@ -78,11 +78,11 @@
  * export mfbt declarations when building mfbt, and they expose import mfbt
  * declarations when using mfbt.
  */
-#if defined(IMPL_MFBT) || defined(EXPORT_JS_API) || defined(STATIC_EXPORTABLE_JS_API) || (defined(JS_STANDALONE) && !defined(MOZ_MEMORY))
+#if defined(IMPL_MFBT) || (defined(JS_STANDALONE) && !defined(MOZ_MEMORY) && (defined(EXPORT_JS_API) || defined(STATIC_EXPORTABLE_JS_API)))
 #  define MFBT_API     MOZ_EXPORT
 #  define MFBT_DATA    MOZ_EXPORT
 #else
-#  if defined(STATIC_JS_API)
+#  if defined(JS_STANDALONE) && !defined(MOZ_MEMORY) && defined(STATIC_JS_API)
 #    define MFBT_API
 #    define MFBT_DATA
 #  else
