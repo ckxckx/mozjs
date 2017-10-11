@@ -148,6 +148,53 @@ pub enum ConversionBehavior {
     Clamp,
 }
 
+/// Use `T` with `ConversionBehavior::Default` but without requiring any
+/// `Config` associated type.
+pub struct Default<T>(pub T);
+
+impl<T> FromJSValConvertible for Default<T>
+where
+    T: FromJSValConvertible<Config = ConversionBehavior>
+{
+    type Config = ();
+    unsafe fn from_jsval(cx: *mut JSContext, val: JS::HandleValue, _: ())
+                         -> Result<ConversionResult<Self>, ()> {
+        T::from_jsval(cx, val, ConversionBehavior::Default).map(|conv| conv.map(Default))
+    }
+}
+
+/// Use `T` with `ConversionBehavior::EnforceRange` but without requiring any
+/// `Config` associated type.
+pub struct EnforceRange<T>(pub T);
+
+impl<T> FromJSValConvertible for EnforceRange<T>
+    where
+    T: FromJSValConvertible<Config = ConversionBehavior>
+{
+    type Config = ();
+    unsafe fn from_jsval(cx: *mut JSContext, val: JS::HandleValue, _: ())
+                         -> Result<ConversionResult<Self>, ()> {
+        T::from_jsval(cx, val, ConversionBehavior::EnforceRange)
+            .map(|conv| conv.map(EnforceRange))
+    }
+}
+
+/// Use `T` with `ConversionBehavior::Clamp` but without requiring any `Config`
+/// associated type.
+pub struct Clamp<T>(pub T);
+
+impl<T> FromJSValConvertible for Clamp<T>
+    where
+    T: FromJSValConvertible<Config = ConversionBehavior>
+{
+    type Config = ();
+    unsafe fn from_jsval(cx: *mut JSContext, val: JS::HandleValue, _: ())
+                         -> Result<ConversionResult<Self>, ()> {
+        T::from_jsval(cx, val, ConversionBehavior::Clamp)
+            .map(|conv| conv.map(Clamp))
+    }
+}
+
 /// Try to cast the number to a smaller type, but
 /// if it doesn't fit, it will return an error.
 unsafe fn enforce_range<D>(cx: *mut JSContext, d: f64) -> Result<ConversionResult<D>, ()>
@@ -686,5 +733,57 @@ impl ToJSValConvertible for Heap<*mut JSObject> {
     unsafe fn to_jsval(&self, cx: *mut JSContext, rval: JS::MutableHandleValue) {
         rval.set(ObjectOrNullValue(self.get()));
         maybe_wrap_object_or_null_value(cx, rval);
+    }
+}
+
+// JSFunction
+
+impl ToJSValConvertible for *mut JSFunction {
+    #[inline]
+    unsafe fn to_jsval(&self, cx: *mut JSContext, rval: JS::MutableHandleValue) {
+        rval.set(ObjectOrNullValue(*self as *mut JSObject));
+        maybe_wrap_object_or_null_value(cx, rval);
+    }
+}
+
+#[cfg(feature = "nonzero")]
+impl ToJSValConvertible for NonZero<*mut JSFunction> {
+    #[inline]
+    unsafe fn to_jsval(&self, cx: *mut JSContext, rval: JS::MutableHandleValue) {
+        use rust::maybe_wrap_object_value;
+        rval.set(ObjectValue(self.get() as *mut JSObject));
+        maybe_wrap_object_value(cx, rval);
+    }
+}
+
+impl ToJSValConvertible for Heap<*mut JSFunction> {
+    #[inline]
+    unsafe fn to_jsval(&self, cx: *mut JSContext, rval: JS::MutableHandleValue) {
+        rval.set(ObjectOrNullValue(self.get() as *mut JSObject));
+        maybe_wrap_object_or_null_value(cx, rval);
+    }
+}
+
+impl ToJSValConvertible for JS::Handle<*mut JSFunction> {
+    #[inline]
+    unsafe fn to_jsval(&self, cx: *mut JSContext, rval: JS::MutableHandleValue) {
+        rval.set(ObjectOrNullValue(self.get() as *mut JSObject));
+        maybe_wrap_object_or_null_value(cx, rval);
+    }
+}
+
+impl FromJSValConvertible for *mut JSFunction {
+    type Config = ();
+
+    unsafe fn from_jsval(cx: *mut JSContext,
+                         val: JS::HandleValue,
+                         _: ())
+                         -> Result<ConversionResult<Self>, ()> {
+        let func = JS_ValueToFunction(cx, val);
+        if func.is_null() {
+            Ok(ConversionResult::Failure("value is not a function".into()))
+        } else {
+            Ok(ConversionResult::Success(func))
+        }
     }
 }
