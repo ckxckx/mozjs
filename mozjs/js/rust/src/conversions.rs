@@ -102,6 +102,17 @@ pub enum ConversionResult<T> {
 }
 
 impl<T> ConversionResult<T> {
+    /// Map a function over the `Success` value.
+    pub fn map<F, U>(self, mut f: F) -> ConversionResult<U>
+    where
+        F: FnMut(T) -> U
+    {
+        match self {
+            ConversionResult::Success(t) => ConversionResult::Success(f(t)),
+            ConversionResult::Failure(e) => ConversionResult::Failure(e),
+        }
+    }
+
     /// Returns Some(value) if it is `ConversionResult::Success`.
     pub fn get_success_value(&self) -> Option<&T> {
         match *self {
