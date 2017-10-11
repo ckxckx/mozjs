@@ -158,6 +158,7 @@ const WHITELIST_TYPES: &'static [&'static str] = &[
     "js::ESClass",
     "JS::ForOfIterator",
     "JS::Handle",
+    "JS::HandleFunction",
     "JS::HandleId",
     "JS::HandleObject",
     "JS::HandleString",
@@ -257,6 +258,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_AtomizeAndPinString",
     "js::AssertSameCompartment",
     "JS::Call",
+    "JS_CallFunctionName",
     "JS_CallFunctionValue",
     "JS::CallOriginalPromiseThen",
     "JS::CallOriginalPromiseResolve",
@@ -450,6 +452,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "js::UnwrapUint8Array",
     "js::UnwrapUint8ClampedArray",
     "js::UseInternalJobQueues",
+    "JS_ValueToFunction",
 ];
 
 /// Types that should be treated as an opaque blob of bytes whenever they show
