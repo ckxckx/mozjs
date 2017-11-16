@@ -222,6 +222,7 @@ const WHITELIST_TYPES: &'static [&'static str] = &[
     "js::shadow::Object",
     "js::shadow::ObjectGroup",
     "JS::SourceBufferHolder",
+    "js::StackFormat",
     "JSStructuredCloneCallbacks",
     "JS::Symbol",
     "JS::SymbolCode",
@@ -250,6 +251,7 @@ const WHITELIST_VARS: &'static [&'static str] = &[
 /// Functions we want to generate bindings to.
 const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "INTERNED_STRING_TO_JSID",
+    "ExceptionStackOrNull",
     "JS_AddExtraGCRootsTracer",
     "JS_AddInterruptCallback",
     "JS::AddPromiseReactions",
@@ -257,6 +259,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_AlreadyHasOwnPropertyById",
     "JS_AtomizeAndPinString",
     "js::AssertSameCompartment",
+    "JS::BuildStackString",
     "JS::Call",
     "JS_CallFunctionName",
     "JS_CallFunctionValue",
