@@ -288,6 +288,7 @@ const WHITELIST_FUNCTIONS: &'static [&'static str] = &[
     "JS_GetObjectPrototype",
     "JS_GetObjectRuntime",
     "JS_GetOwnPropertyDescriptorById",
+    "JS::GetPromiseResult",
     "JS::GetPromiseState",
     "JS_GetPropertyDescriptorById",
     "js::GetPropertyKeys",
