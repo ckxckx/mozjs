@@ -47,6 +47,7 @@ impl StructuredCloneScope for DifferentProcess {
 }
 
 /// An RAII owned buffer for structured cloning into and out of.
+#[derive(Debug)]
 pub struct StructuredCloneBuffer<'a, S> {
     raw: *mut jsapi::JSAutoStructuredCloneBuffer,
     callbacks: &'a jsapi::JSStructuredCloneCallbacks,
