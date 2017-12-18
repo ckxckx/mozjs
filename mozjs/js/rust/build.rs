@@ -68,6 +68,7 @@ fn build_jsapi_bindings() {
         .rust_target(bindgen::RustTarget::Stable_1_19)
         .header("./etc/wrapper.hpp")
         .raw_line("pub use self::root::*;")
+        .rustified_enum(".*")
         .enable_cxx_namespaces();
 
     if cfg!(feature = "debugmozjs") {
@@ -110,6 +111,8 @@ fn build_jsapi_bindings() {
     for ty in BLACKLIST_TYPES {
         builder = builder.hide_type(ty);
     }
+
+    builder.dump_preprocessed_input().unwrap();
 
     let bindings = builder.generate()
         .expect("Should generate JSAPI bindings OK");
