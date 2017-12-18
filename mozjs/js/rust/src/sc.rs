@@ -7,28 +7,74 @@
 use glue;
 use jsapi;
 use rust::Runtime;
+use std::marker::PhantomData;
 use std::ptr;
 
-/// An RAII owned buffer for structured cloning into and out of.
-pub struct StructuredCloneBuffer {
-    raw: *mut jsapi::JSAutoStructuredCloneBuffer,
+/// The scope of a structured clone buffer.
+pub trait StructuredCloneScope {
+    /// The raw JSAPI form.
+    fn raw() -> jsapi::JS::StructuredCloneScope;
 }
 
-impl StructuredCloneBuffer {
+/// A non-`Send` structured clone within this thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SameProcessSameThread(PhantomData<*mut ()>);
+
+impl StructuredCloneScope for SameProcessSameThread {
+    fn raw() -> jsapi::JS::StructuredCloneScope {
+        jsapi::JS::StructuredCloneScope::SameProcessSameThread
+    }
+}
+
+/// A structured clone that crosses thread boundaries within the same process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SameProcessDifferentThread;
+
+impl StructuredCloneScope for SameProcessDifferentThread {
+    fn raw() -> jsapi::JS::StructuredCloneScope {
+        jsapi::JS::StructuredCloneScope::SameProcessDifferentThread
+    }
+}
+
+/// A structured clone that crosses process boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DifferentProcess;
+
+impl StructuredCloneScope for DifferentProcess {
+    fn raw() -> jsapi::JS::StructuredCloneScope {
+        jsapi::JS::StructuredCloneScope::DifferentProcess
+    }
+}
+
+/// An RAII owned buffer for structured cloning into and out of.
+pub struct StructuredCloneBuffer<'a, S> {
+    raw: *mut jsapi::JSAutoStructuredCloneBuffer,
+    callbacks: &'a jsapi::JSStructuredCloneCallbacks,
+    scope: PhantomData<S>,
+}
+
+/// A `StructuredCloneBuffer`'s `Send` is controlled by its scope: if its scope
+/// is `Send`, then it is too.
+unsafe impl<'a, S: Send> Send for StructuredCloneBuffer<'a, S> {}
+
+impl<'a, S> StructuredCloneBuffer<'a, S>
+where
+    S: StructuredCloneScope,
+{
     /// Construct a new `StructuredCloneBuffer`.
     ///
     /// # Panics
     ///
     /// Panics if the underlying JSAPI calls fail.
-    pub fn new(scope: jsapi::JS::StructuredCloneScope,
-               callbacks: &jsapi::JSStructuredCloneCallbacks)
-               -> StructuredCloneBuffer {
+    pub fn new(callbacks: &'a jsapi::JSStructuredCloneCallbacks)-> Self {
         let raw = unsafe {
-            glue::NewJSAutoStructuredCloneBuffer(scope, callbacks)
+            glue::NewJSAutoStructuredCloneBuffer(S::raw(), callbacks)
         };
         assert!(!raw.is_null());
         StructuredCloneBuffer {
-            raw: raw,
+            raw,
+            callbacks,
+            scope: PhantomData,
         }
     }
 
@@ -52,12 +98,10 @@ impl StructuredCloneBuffer {
     }
 
     /// Read a JS value out of this buffer.
-    pub fn read(&mut self,
-                vp: jsapi::JS::MutableHandleValue,
-                callbacks: &jsapi::JSStructuredCloneCallbacks)
+    pub fn read(&mut self, vp: jsapi::JS::MutableHandleValue)
                 -> Result<(), ()> {
         if unsafe {
-            (*self.raw).read(Runtime::get(), vp, callbacks, ptr::null_mut())
+            (*self.raw).read(Runtime::get(), vp, self.callbacks, ptr::null_mut())
         } {
             Ok(())
         } else {
@@ -93,10 +137,27 @@ impl StructuredCloneBuffer {
     }
 }
 
-impl Drop for StructuredCloneBuffer {
+impl<'a, S> Drop for StructuredCloneBuffer<'a, S> {
     fn drop(&mut self) {
         unsafe {
             glue::DeleteJSAutoStructuredCloneBuffer(self.raw);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_send<S: Send>(_: S) {}
+
+    #[test]
+    fn same_process_different_thread_scope_is_send() {
+        is_send(SameProcessDifferentThread);
+    }
+
+    #[test]
+    fn different_process_scope_is_send() {
+        is_send(DifferentProcess);
     }
 }
