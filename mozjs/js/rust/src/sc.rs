@@ -111,12 +111,9 @@ where
     }
 
     /// Write a JS value into this buffer.
-    pub fn write(&mut self,
-                 v: jsapi::JS::HandleValue,
-                 callbacks: &jsapi::JSStructuredCloneCallbacks)
-                 -> Result<(), ()> {
+    pub fn write(&mut self, v: jsapi::JS::HandleValue) -> Result<(), ()> {
         if unsafe {
-            (*self.raw).write(Runtime::get(), v, callbacks, ptr::null_mut())
+            (*self.raw).write(Runtime::get(), v, self.callbacks, ptr::null_mut())
         } {
             Ok(())
         } else {
